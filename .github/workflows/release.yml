@@ -5,11 +5,13 @@ on:
     tags:
       - "v*"
 
+permissions:
+  contents: write
+
 jobs:
   publish-crate:
     name: Publish to crates.io
     runs-on: ubuntu-latest
-    if: ${{ secrets.CARGO_REGISTRY_TOKEN != '' }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -17,15 +19,20 @@ jobs:
       - name: Verify tag matches Cargo.toml version
         run: |
           TAG="${GITHUB_REF_NAME#v}"
-          VERSION=$(grep -m1 '^version = ' Cargo.toml | sed -E 's/version = \"([^\"]+)\"/\\1/')
+          VERSION=$(grep -m1 '^version = ' Cargo.toml | sed -E 's/version = "([^"]+)"/\1/')
           if [ "$TAG" != "$VERSION" ]; then
             echo "Tag v$TAG does not match Cargo.toml version $VERSION"
             exit 1
           fi
-      - name: Publish
+      - name: Publish to crates.io
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: cargo publish
+        run: |
+          if [ -n "$CARGO_REGISTRY_TOKEN" ]; then
+            cargo publish
+          else
+            echo "CARGO_REGISTRY_TOKEN not set, skipping publish"
+          fi
 
   github-release:
     name: GitHub Release
