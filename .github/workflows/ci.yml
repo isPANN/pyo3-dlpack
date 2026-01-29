@@ -29,8 +29,6 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
         python-version: ["3.10", "3.11", "3.12"]
-    env:
-      PYO3_PYTHON: python
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -52,12 +50,18 @@ jobs:
           pip install -e ".[test-lite]"
       - name: Rust unit tests (unix)
         if: runner.os != 'Windows'
+        env:
+          PYO3_PYTHON: .venv/bin/python
         run: |
           source .venv/bin/activate
           make test-unit
       - name: Rust unit tests (windows)
         if: runner.os == 'Windows'
-        run: cargo test --lib
+        env:
+          PYO3_PYTHON: .venv\Scripts\python.exe
+        run: |
+          .venv\Scripts\activate
+          make test-unit
       - name: Build test module (unix)
         if: runner.os != 'Windows'
         run: |
