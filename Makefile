@@ -13,6 +13,9 @@
 # Default target
 all: test
 
+# Detect Python command (prefer venv if available)
+PYTHON := $(shell if [ -f .venv/bin/python ]; then echo .venv/bin/python; else echo python3; fi)
+
 # Build the Python test module from tests/test_module
 build:
 	@echo "Building test module..."
@@ -22,7 +25,7 @@ build:
 test: test-unit test-integration
 
 # Python library directory (for linking during tests)
-PYTHON_LIBDIR := $(shell python3 -c "import sysconfig; print(sysconfig.get_config_var('LIBDIR') or '')")
+PYTHON_LIBDIR := $(shell $(PYTHON) -c "import sysconfig; print(sysconfig.get_config_var('LIBDIR') or '')")
 
 # Run Rust unit tests
 # Set library paths for all platforms: macOS (DYLD), Linux (LD), Windows (PATH)
@@ -36,27 +39,27 @@ test-unit:
 # Run all integration tests
 test-integration: build
 	@echo "Running integration tests..."
-	python3 -m pytest tests/test_dlpack_integration.py -v
+	$(PYTHON) -m pytest tests/test_dlpack_integration.py -v
 
 # Run CPU integration tests only
 test-cpu: build
 	@echo "Running CPU integration tests..."
-	python3 -m pytest tests/test_dlpack_integration.py -v -k "Cpu or not Gpu"
+	$(PYTHON) -m pytest tests/test_dlpack_integration.py -v -k "Cpu or not Gpu"
 
 # Run GPU integration tests only
 test-gpu: build
 	@echo "Running GPU integration tests..."
-	python3 -m pytest tests/test_dlpack_integration.py -v -k "Gpu"
+	$(PYTHON) -m pytest tests/test_dlpack_integration.py -v -k "Gpu"
 
 # Run memory safety tests
 test-memory: build
 	@echo "Running memory safety tests..."
-	python3 -m pytest tests/test_dlpack_integration.py -v -k "MemorySafety"
+	$(PYTHON) -m pytest tests/test_dlpack_integration.py -v -k "MemorySafety"
 
 # Run stress tests
 test-stress: build
 	@echo "Running stress tests..."
-	python3 -m pytest tests/test_dlpack_integration.py -v -k "Stress"
+	$(PYTHON) -m pytest tests/test_dlpack_integration.py -v -k "Stress"
 
 # Clean build artifacts
 clean:
