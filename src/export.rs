@@ -5,8 +5,7 @@
 
 use crate::ffi::{DLDataType, DLDevice, DLManagedTensor, DLTensor};
 use pyo3::prelude::*;
-use pyo3::types::PyCapsule;
-use std::ffi::{c_void, CStr, CString};
+use std::ffi::{c_void, CStr};
 
 /// Information about a tensor for DLPack export.
 ///
@@ -137,15 +136,8 @@ struct ExportContext<T> {
     strides: Option<Vec<i64>>,
 }
 
-/// Wrapper to make the managed tensor pointer Send.
-///
-/// Safety: We ensure that the DLManagedTensor is valid and only accessed
-/// from Python with the GIL held.
-struct SendablePtr(*mut DLManagedTensor);
-unsafe impl Send for SendablePtr {}
-
-/// The DLPack capsule name
-const DLPACK_CAPSULE_NAME: &str = "dltensor";
+/// The DLPack capsule name (null-terminated for C compatibility)
+static DLPACK_CAPSULE_NAME: &[u8] = b"dltensor\0";
 
 /// The name for consumed DLPack capsules (per DLPack protocol)
 /// Using a static byte array with null terminator for C compatibility
@@ -187,27 +179,39 @@ fn export_to_capsule<T: IntoDLPack>(
     });
 
     let managed_ptr = Box::into_raw(managed);
-    let sendable = SendablePtr(managed_ptr);
 
-    // Create the capsule name
-    let name = CString::new(DLPACK_CAPSULE_NAME).expect("CString::new failed");
+    // Create the PyCapsule using low-level FFI to ensure the pointer is stored directly.
+    // DLPack consumers expect PyCapsule_GetPointer to return a DLManagedTensor* directly.
+    // Use static name so it remains valid for the capsule's lifetime.
+    let capsule_ptr = unsafe {
+        pyo3::ffi::PyCapsule_New(
+            managed_ptr as *mut c_void,
+            DLPACK_CAPSULE_NAME.as_ptr() as *const i8,
+            Some(raw_capsule_destructor::<T>),
+        )
+    };
 
-    // Create the PyCapsule
-    let capsule = PyCapsule::new_with_destructor(py, sendable, Some(name), capsule_destructor::<T>)?;
-
-    // Store the capsule's own pointer in its context so the destructor can check
-    // if the capsule was consumed (renamed to "used_dltensor" by the consumer).
-    // This is necessary to avoid double-free when frameworks like torch.from_dlpack
-    // take ownership and call the deleter themselves.
-    let capsule_ptr = capsule.as_ptr();
-    unsafe {
-        pyo3::ffi::PyCapsule_SetContext(capsule_ptr, capsule_ptr as *mut c_void);
+    if capsule_ptr.is_null() {
+        // Clean up on failure
+        unsafe {
+            let _ = Box::from_raw(managed_ptr);
+        }
+        return Err(pyo3::exceptions::PyMemoryError::new_err(
+            "Failed to create DLPack capsule",
+        ));
     }
 
-    Ok(capsule.into_any().unbind())
+    // Store a reference to ctx_ptr in the capsule context so the destructor
+    // can check if the capsule was consumed and clean up properly.
+    unsafe {
+        pyo3::ffi::PyCapsule_SetContext(capsule_ptr, ctx_ptr as *mut c_void);
+    }
+
+    // Convert to PyObject
+    Ok(unsafe { Py::from_owned_ptr(py, capsule_ptr) })
 }
 
-/// PyCapsule destructor - called when Python garbage collects the capsule.
+/// Raw PyCapsule destructor - called by Python when garbage collecting the capsule.
 ///
 /// Per the DLPack protocol, when a consumer takes ownership of the tensor
 /// (e.g., via torch.from_dlpack), it must rename the capsule from "dltensor"
@@ -216,34 +220,40 @@ fn export_to_capsule<T: IntoDLPack>(
 /// This destructor checks the capsule name to avoid double-free:
 /// - If name is "dltensor": capsule was never consumed, we call the deleter
 /// - If name is "used_dltensor": consumer owns it and will call deleter, skip
-fn capsule_destructor<T>(ptr: SendablePtr, context: *mut c_void) {
-    if ptr.0.is_null() {
+unsafe extern "C" fn raw_capsule_destructor<T>(capsule_ptr: *mut pyo3::ffi::PyObject) {
+    if capsule_ptr.is_null() {
         return;
     }
 
-    // The context is the capsule's own pointer (set in export_to_capsule).
-    // Use it to check if the capsule was consumed by checking its name.
-    let capsule_ptr = context as *mut pyo3::ffi::PyObject;
-    if !capsule_ptr.is_null() {
-        unsafe {
-            let name_ptr = pyo3::ffi::PyCapsule_GetName(capsule_ptr);
-            if !name_ptr.is_null() {
-                let name = CStr::from_ptr(name_ptr);
-                // If name is "used_dltensor", the consumer has taken ownership
-                // and will call the deleter when done. Don't double-free.
-                if name.to_bytes() == USED_DLTENSOR_NAME[..USED_DLTENSOR_NAME.len() - 1].as_ref() {
-                    return;
-                }
-            }
-        }
+    // Check the capsule name to see if it was consumed
+    let name_ptr = pyo3::ffi::PyCapsule_GetName(capsule_ptr);
+    if name_ptr.is_null() {
+        // No name set - shouldn't happen with our capsules
+        return;
     }
 
-    // Capsule was not consumed (or we couldn't check), call the DLPack deleter
-    unsafe {
-        let managed = &*ptr.0;
-        if let Some(deleter) = managed.deleter {
-            deleter(ptr.0);
-        }
+    let name = CStr::from_ptr(name_ptr);
+
+    // If name is "used_dltensor", the consumer has taken ownership
+    // and will call the deleter when done. Don't double-free.
+    if name.to_bytes() == USED_DLTENSOR_NAME[..USED_DLTENSOR_NAME.len() - 1].as_ref() {
+        return;
+    }
+
+    // Get the DLManagedTensor pointer from the capsule using the current name
+    let managed_ptr = pyo3::ffi::PyCapsule_GetPointer(
+        capsule_ptr,
+        name_ptr,
+    ) as *mut DLManagedTensor;
+
+    if managed_ptr.is_null() {
+        return;
+    }
+
+    // Capsule was not consumed, call the DLPack deleter
+    let managed = &*managed_ptr;
+    if let Some(deleter) = managed.deleter {
+        deleter(managed_ptr);
     }
 }
 
@@ -648,21 +658,16 @@ mod tests {
 
     #[test]
     fn test_capsule_destructor_null_check() {
-        // Test that capsule_destructor handles null safely
-        let null_ptr = SendablePtr(std::ptr::null_mut());
-        capsule_destructor::<TestTensor>(null_ptr, std::ptr::null_mut());
+        // Test that raw_capsule_destructor handles null safely
+        unsafe {
+            raw_capsule_destructor::<TestTensor>(std::ptr::null_mut());
+        }
         // Should not crash
     }
 
     // ========================================================================
     // Send trait verification
     // ========================================================================
-
-    #[test]
-    fn test_sendable_ptr_send() {
-        fn assert_send<T: Send>() {}
-        assert_send::<SendablePtr>();
-    }
 
     #[test]
     fn test_into_dlpack_requires_send() {

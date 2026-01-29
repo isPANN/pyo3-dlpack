@@ -10,6 +10,24 @@ This demonstrates:
 
 import numpy as np
 
+
+class DLPackWrapper:
+    """Wrapper to make a PyCapsule compatible with np.from_dlpack()"""
+    def __init__(self, capsule):
+        self._capsule = capsule
+
+    def __dlpack__(self, stream=None):
+        return self._capsule
+
+    def __dlpack_device__(self):
+        # Default to CPU (device_type=1, device_id=0)
+        return (1, 0)
+
+
+def from_dlpack(capsule):
+    """Convert a DLPack capsule to numpy array"""
+    return np.from_dlpack(DLPackWrapper(capsule))
+
 # Try to import torch if available
 try:
     import torch
@@ -18,14 +36,14 @@ except ImportError:
     HAS_TORCH = False
     print("PyTorch not available, using NumPy only\n")
 
-# Import the example module
-# First build it with: maturin develop --manifest-path examples/basic_usage/Cargo.toml
+# Import the test module (contains all example functions)
+# First build it with: cd tests/python_helpers && maturin develop
 try:
-    import basic_usage
+    import dlpack_test_module as basic_usage
 except ImportError:
-    print("Error: basic_usage module not found!")
+    print("Error: dlpack_test_module not found!")
     print("Build it with:")
-    print("  cd examples/basic_usage && maturin develop")
+    print("  cd tests/python_helpers && maturin develop")
     exit(1)
 
 
@@ -50,23 +68,23 @@ def demo_numpy():
 
     # Double all values
     doubled = basic_usage.double_tensor(arr)
-    doubled_np = np.from_dlpack(doubled)
+    doubled_np = from_dlpack(doubled)
     print(f"\nDoubled array (Rust):\n{doubled_np}")
     print(f"Expected:\n{arr * 2}")
 
     # Create tensors in Rust
     rust_tensor = basic_usage.create_tensor()
-    rust_arr = np.from_dlpack(rust_tensor)
+    rust_arr = from_dlpack(rust_tensor)
     print(f"\nTensor created in Rust:\n{rust_arr}")
 
     # Create filled tensor
     filled = basic_usage.create_filled_tensor(3.14, 3, 4)
-    filled_arr = np.from_dlpack(filled)
+    filled_arr = from_dlpack(filled)
     print(f"\nFilled tensor (3.14):\n{filled_arr}")
 
     # Create identity matrix
     identity = basic_usage.create_identity(4)
-    identity_arr = np.from_dlpack(identity)
+    identity_arr = from_dlpack(identity)
     print(f"\nIdentity matrix:\n{identity_arr}")
 
 
@@ -117,15 +135,15 @@ def demo_interop():
     # Process in Rust
     doubled_capsule = basic_usage.double_tensor(np_arr)
 
-    # Convert to NumPy
-    doubled_np = np.from_dlpack(doubled_capsule)
+    # Convert to NumPy using wrapper
+    doubled_np = from_dlpack(doubled_capsule)
     print(f"\n2. Processed in Rust, back to NumPy:\n{doubled_np}")
 
     if HAS_TORCH:
-        # Convert to PyTorch (from the same capsule - zero copy!)
+        # Convert to PyTorch using the legacy API that accepts capsules
         # Note: Can't reuse capsule after consumption, need to recreate
         doubled_capsule2 = basic_usage.double_tensor(np_arr)
-        doubled_torch = torch.from_dlpack(doubled_capsule2)
+        doubled_torch = torch.utils.dlpack.from_dlpack(doubled_capsule2)
         print(f"\n3. Same data in PyTorch:\n{doubled_torch}")
 
         # Verify they share the same data (zero-copy)
