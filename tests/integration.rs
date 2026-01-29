@@ -26,7 +26,7 @@ impl IntoDLPack for TestTensor {
 
 #[test]
 fn test_export_to_capsule() {
-    Python::with_gil(|py| {
+    Python::attach(|py| {
         let tensor = TestTensor {
             data: vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
             shape: vec![2, 3],
@@ -39,7 +39,7 @@ fn test_export_to_capsule() {
 
 #[test]
 fn test_import_from_numpy() {
-    Python::with_gil(|py| {
+    Python::attach(|py| {
         // Create numpy array
         let numpy = py.import("numpy").expect("numpy not available");
         let array = numpy
@@ -49,7 +49,7 @@ fn test_import_from_numpy() {
             .unwrap();
 
         // Import to Rust
-        let tensor = PyTensor::from_pyany(py, array).expect("Failed to import");
+        let tensor = PyTensor::from_pyany(py, &array).expect("Failed to import");
 
         // Verify metadata
         assert_eq!(tensor.shape(), &[2, 3]);
@@ -60,7 +60,7 @@ fn test_import_from_numpy() {
 
 #[test]
 fn test_capsule_marked_as_used() {
-    Python::with_gil(|py| {
+    Python::attach(|py| {
         // Create numpy array and get capsule
         let numpy = py.import("numpy").expect("numpy not available");
         let array = numpy
@@ -93,7 +93,7 @@ fn test_capsule_marked_as_used() {
 
 #[test]
 fn test_second_import_fails() {
-    Python::with_gil(|py| {
+    Python::attach(|py| {
         let numpy = py.import("numpy").expect("numpy not available");
         let array = numpy
             .getattr("array")
