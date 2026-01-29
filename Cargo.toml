@@ -22,3 +22,7 @@ pyo3 = { version = "0.27", features = ["auto-initialize"] }
 default = []
 # Enable extension-module for building Python extensions
 extension-module = ["pyo3/extension-module"]
+
+[[example]]
+name = "basic_usage"
+crate-type = ["cdylib", "rlib"]
