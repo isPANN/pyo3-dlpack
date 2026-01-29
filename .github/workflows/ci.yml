@@ -37,5 +37,12 @@ jobs:
           python-version: "3.11"
       - name: Install dependencies
         run: pip install -e ".[test-lite]"
-      - name: Run tests
+      - name: Run tests (unix)
+        if: runner.os != 'Windows'
         run: make test
+      - name: Run tests (windows)
+        if: runner.os == 'Windows'
+        run: |
+          cargo test --lib
+          maturin develop --manifest-path tests/python_helpers/Cargo.toml
+          pytest tests/test_dlpack_integration.py -v
