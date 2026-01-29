@@ -12,6 +12,8 @@ A complete example showing:
 - **Processing** tensor data in Rust
 - **Exporting** tensors from Rust back to Python
 - **Round-trip** processing (Python → Rust → Python)
+- **CUDA tensors** - handling NVIDIA GPU tensors
+- **Metal tensors** - handling Apple Silicon GPU tensors (MPS)
 
 ## Running the Examples
 
@@ -85,6 +87,59 @@ identity = torch.from_dlpack(rust_capsule)
 print(identity)
 ```
 
+### Option 4: With CUDA (NVIDIA GPU)
+
+If you have PyTorch with CUDA support:
+
+```python
+import torch
+import basic_usage
+
+# Create a CUDA tensor
+cuda_tensor = torch.randn(3, 4, device="cuda:0")
+
+# Inspect in Rust - shows CUDA device info
+basic_usage.inspect_tensor(cuda_tensor)
+
+# Check device type
+device = basic_usage.get_device_type(cuda_tensor)
+print(f"Device: {device}")  # Output: cuda:0
+
+# Get the raw CUDA device pointer (for kernel interop)
+ptr = basic_usage.get_data_ptr(cuda_tensor)
+print(f"CUDA pointer: 0x{ptr:x}")
+
+# Validate tensor properties
+is_valid = basic_usage.validate_tensor(cuda_tensor, [3, 4], "cuda")
+```
+
+### Option 5: With Metal (Apple Silicon GPU)
+
+If you have PyTorch with MPS (Metal Performance Shaders) support on macOS:
+
+```python
+import torch
+import basic_usage
+
+# Create an MPS tensor (Apple Silicon GPU)
+mps_tensor = torch.randn(3, 4, device="mps:0")
+
+# Inspect in Rust - shows Metal device info
+basic_usage.inspect_tensor(mps_tensor)
+
+# Check device type
+device = basic_usage.get_device_type(mps_tensor)
+print(f"Device: {device}")  # Output: metal:0
+
+# Get the raw Metal buffer pointer
+ptr = basic_usage.get_data_ptr(mps_tensor)
+print(f"Metal pointer: 0x{ptr:x}")
+
+# Check if it's a GPU tensor
+is_gpu = basic_usage.is_gpu_tensor(mps_tensor)
+print(f"Is GPU: {is_gpu}")  # Output: True
+```
+
 ## What the Examples Demonstrate
 
 ### Import Path (Python → Rust)
@@ -154,10 +209,41 @@ arr = np.from_dlpack(capsule)
 # tensor = torch.from_dlpack(capsule)  # Note: capsule consumed, need new one
 ```
 
+### GPU Tensor Handling (CUDA and Metal)
+
+```rust
+#[pyfunction]
+fn process_gpu_tensor(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<()> {
+    let tensor = PyTensor::from_pyany(py, obj)?;
+    let device = tensor.device();
+
+    // Check device type
+    if device.is_cuda() {
+        println!("CUDA tensor on GPU {}", device.device_id);
+        // Get device pointer for CUDA kernel
+        let cuda_ptr = tensor.data_ptr();
+        // Pass cuda_ptr to your CUDA kernels...
+    } else if device.is_metal() {
+        println!("Metal tensor on GPU {}", device.device_id);
+        // Get Metal buffer pointer
+        let metal_ptr = tensor.data_ptr();
+        // Pass metal_ptr to Metal compute shaders...
+    } else if device.is_cpu() {
+        println!("CPU tensor");
+        // Safe to access as regular memory
+    }
+
+    Ok(())
+}
+```
+
 ## Key Features Demonstrated
 
 ✅ **Zero-copy** data sharing
 ✅ **CPU** and **GPU** tensors
+✅ **CUDA support** (NVIDIA GPUs)
+✅ **Metal support** (Apple Silicon GPUs via MPS)
+✅ **ROCm support** (AMD GPUs)
 ✅ **Multiple frameworks** (NumPy, PyTorch)
 ✅ **Contiguous** and **non-contiguous** tensors
 ✅ **Different dtypes** (f32, f64, i32, etc.)

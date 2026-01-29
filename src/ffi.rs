@@ -116,6 +116,11 @@ impl DLDevice {
     pub fn is_rocm(&self) -> bool {
         self.device_type == DLDeviceType::Rocm as u32
     }
+
+    /// Check if this is a Metal device (Apple GPU).
+    pub fn is_metal(&self) -> bool {
+        self.device_type == DLDeviceType::Metal as u32
+    }
 }
 
 /// Data type codes as defined by DLPack.
@@ -319,6 +324,11 @@ pub fn cpu_device() -> DLDevice {
     DLDevice::new(DLDeviceType::Cpu, 0)
 }
 
+/// Create a DLDevice for Metal (Apple GPU) with the specified device ID.
+pub fn metal_device(device_id: i32) -> DLDevice {
+    DLDevice::new(DLDeviceType::Metal, device_id)
+}
+
 /// Create a DLDataType for f32 (single precision float).
 pub fn dtype_f32() -> DLDataType {
     DLDataType::new(DLDataTypeCode::Float, 32, 1)
@@ -491,6 +501,14 @@ mod tests {
         assert!(DLDevice::new(DLDeviceType::Rocm, 0).is_rocm());
         assert!(!cpu_device().is_rocm());
         assert!(!cuda_device(0).is_rocm());
+    }
+
+    #[test]
+    fn test_device_is_metal() {
+        assert!(DLDevice::new(DLDeviceType::Metal, 0).is_metal());
+        assert!(metal_device(0).is_metal());
+        assert!(!cpu_device().is_metal());
+        assert!(!cuda_device(0).is_metal());
     }
 
     #[test]
@@ -767,6 +785,17 @@ mod tests {
         let dev = cpu_device();
         assert!(dev.is_cpu());
         assert_eq!(dev.device_id, 0);
+    }
+
+    #[test]
+    fn test_metal_device() {
+        let dev = metal_device(0);
+        assert!(dev.is_metal());
+        assert_eq!(dev.device_id, 0);
+
+        let dev1 = metal_device(1);
+        assert!(dev1.is_metal());
+        assert_eq!(dev1.device_id, 1);
     }
 
     #[test]

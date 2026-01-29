@@ -68,7 +68,7 @@ pub use export::{IntoDLPack, TensorInfo};
 
 // Convenience constructors
 pub use ffi::{
-    cpu_device, cuda_device,
+    cpu_device, cuda_device, metal_device,
     dtype_f16, dtype_f32, dtype_f64, dtype_bf16,
     dtype_i8, dtype_i16, dtype_i32, dtype_i64,
     dtype_u8, dtype_u16, dtype_u32, dtype_u64,

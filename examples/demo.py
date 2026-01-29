@@ -132,14 +132,14 @@ def demo_interop():
         print("\nAll conversions were zero-copy! No data was duplicated.")
 
 
-def demo_gpu():
-    """Demo with GPU tensors (if CUDA available)"""
+def demo_cuda():
+    """Demo with CUDA GPU tensors"""
     if not HAS_TORCH or not torch.cuda.is_available():
-        print("\n(GPU demo skipped - CUDA not available)")
+        print("\n(CUDA demo skipped - CUDA not available)")
         return
 
     print("\n" + "=" * 60)
-    print("GPU Demo (CUDA)")
+    print("CUDA GPU Demo")
     print("=" * 60)
 
     # Create a CUDA tensor
@@ -151,7 +151,65 @@ def demo_gpu():
     print("\nInspecting CUDA tensor in Rust:")
     basic_usage.inspect_tensor(tensor)
 
-    print("\nNote: Actual processing on GPU requires CUDA operations in Rust")
+    # Check device type
+    device_str = basic_usage.get_device_type(tensor)
+    print(f"\nDevice string from Rust: {device_str}")
+
+    # Check if it's a GPU tensor
+    is_gpu = basic_usage.is_gpu_tensor(tensor)
+    print(f"Is GPU tensor: {is_gpu}")
+
+    # Get raw data pointer (device pointer)
+    ptr = basic_usage.get_data_ptr(tensor)
+    print(f"CUDA device pointer: 0x{ptr:x}")
+
+    # Validate tensor
+    is_valid = basic_usage.validate_tensor(tensor, [2, 3], "cuda")
+    print(f"Tensor validation (shape=[2,3], device=cuda): {is_valid}")
+
+    print("\nNote: For actual GPU computation, use CUDA kernels with this pointer")
+
+
+def demo_metal():
+    """Demo with Metal GPU tensors (Apple Silicon MPS)"""
+    if not HAS_TORCH:
+        print("\n(Metal demo skipped - PyTorch not available)")
+        return
+
+    if not torch.backends.mps.is_available():
+        print("\n(Metal demo skipped - MPS not available)")
+        return
+
+    print("\n" + "=" * 60)
+    print("Metal GPU Demo (Apple Silicon MPS)")
+    print("=" * 60)
+
+    # Create an MPS tensor
+    tensor = torch.tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]],
+                         dtype=torch.float32, device="mps:0")
+    print(f"\nMetal (MPS) tensor:\n{tensor}")
+
+    # Inspect in Rust
+    print("\nInspecting Metal tensor in Rust:")
+    basic_usage.inspect_tensor(tensor)
+
+    # Check device type
+    device_str = basic_usage.get_device_type(tensor)
+    print(f"\nDevice string from Rust: {device_str}")
+
+    # Check if it's a GPU tensor
+    is_gpu = basic_usage.is_gpu_tensor(tensor)
+    print(f"Is GPU tensor: {is_gpu}")
+
+    # Get raw data pointer (Metal buffer pointer)
+    ptr = basic_usage.get_data_ptr(tensor)
+    print(f"Metal device pointer: 0x{ptr:x}")
+
+    # Validate tensor
+    is_valid = basic_usage.validate_tensor(tensor, [2, 3], "metal")
+    print(f"Tensor validation (shape=[2,3], device=metal): {is_valid}")
+
+    print("\nNote: For actual GPU computation, use Metal compute shaders with this pointer")
 
 
 if __name__ == "__main__":
@@ -166,7 +224,10 @@ if __name__ == "__main__":
         demo_numpy()
         demo_torch()
         demo_interop()
-        demo_gpu()
+
+        # GPU demos
+        demo_cuda()
+        demo_metal()
 
         print("\n" + "=" * 60)
         print("Demo Complete!")

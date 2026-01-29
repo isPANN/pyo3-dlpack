@@ -4,6 +4,8 @@
 //! 1. Importing tensors from Python (NumPy/PyTorch) to Rust
 //! 2. Exporting tensors from Rust to Python
 //! 3. Processing tensor data in Rust
+//! 4. Working with CUDA tensors (NVIDIA GPUs)
+//! 5. Working with Metal tensors (Apple Silicon GPUs via MPS)
 //!
 //! Build and test:
 //!   cargo run --example basic_usage
@@ -13,7 +15,7 @@
 //!   python3 -c "import basic_usage; basic_usage.demo()"
 
 use pyo3::prelude::*;
-use pyo3_dlpack::{cpu_device, dtype_f32, IntoDLPack, PyTensor, TensorInfo};
+use pyo3_dlpack::{cpu_device, dtype_f32, DLDeviceType, IntoDLPack, PyTensor, TensorInfo};
 use std::ffi::c_void;
 
 // ============================================================================
@@ -33,9 +35,29 @@ fn inspect_tensor(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<()> {
     println!("  Data type size: {} bytes", tensor.itemsize());
     println!("  Total size: {} bytes", tensor.nbytes());
     println!("  Is contiguous: {}", tensor.is_contiguous());
-    println!("  Device: {:?}", tensor.device());
-    println!("  Is CPU: {}", tensor.device().is_cpu());
-    println!("  Is CUDA: {}", tensor.device().is_cuda());
+
+    // Device information
+    let device = tensor.device();
+    let device_name = match device.device_type_enum() {
+        Some(DLDeviceType::Cpu) => "CPU",
+        Some(DLDeviceType::Cuda) => "CUDA (NVIDIA GPU)",
+        Some(DLDeviceType::CudaHost) => "CUDA Host (Pinned Memory)",
+        Some(DLDeviceType::CudaManaged) => "CUDA Managed (Unified Memory)",
+        Some(DLDeviceType::Metal) => "Metal (Apple GPU)",
+        Some(DLDeviceType::Rocm) => "ROCm (AMD GPU)",
+        Some(DLDeviceType::Vulkan) => "Vulkan",
+        Some(DLDeviceType::OpenCL) => "OpenCL",
+        Some(other) => {
+            println!("  Device: {:?} (id: {})", other, device.device_id);
+            return Ok(());
+        }
+        None => "Unknown",
+    };
+    println!("  Device: {} (id: {})", device_name, device.device_id);
+    println!("  Is CPU: {}", device.is_cpu());
+    println!("  Is CUDA: {}", device.is_cuda());
+    println!("  Is Metal: {}", device.is_metal());
+    println!("  Is ROCm: {}", device.is_rocm());
 
     Ok(())
 }
@@ -161,6 +183,82 @@ fn double_tensor(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> 
 }
 
 // ============================================================================
+// Example 4: GPU tensor handling (CUDA and Metal)
+// ============================================================================
+
+/// Check if a tensor is on a GPU device (CUDA, Metal, or ROCm)
+#[pyfunction]
+fn is_gpu_tensor(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<bool> {
+    let tensor = PyTensor::from_pyany(py, obj)?;
+    let device = tensor.device();
+    Ok(device.is_cuda() || device.is_metal() || device.is_rocm())
+}
+
+/// Get the device type as a string
+#[pyfunction]
+fn get_device_type(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<String> {
+    let tensor = PyTensor::from_pyany(py, obj)?;
+    let device = tensor.device();
+
+    let name = match device.device_type_enum() {
+        Some(DLDeviceType::Cpu) => "cpu",
+        Some(DLDeviceType::Cuda) => "cuda",
+        Some(DLDeviceType::CudaHost) => "cuda_host",
+        Some(DLDeviceType::CudaManaged) => "cuda_managed",
+        Some(DLDeviceType::Metal) => "metal",
+        Some(DLDeviceType::Rocm) => "rocm",
+        Some(DLDeviceType::Vulkan) => "vulkan",
+        Some(DLDeviceType::OpenCL) => "opencl",
+        _ => "unknown",
+    };
+
+    Ok(format!("{}:{}", name, device.device_id))
+}
+
+/// Get the raw data pointer as an integer (useful for GPU interop)
+///
+/// For GPU tensors, this returns the device pointer that can be passed
+/// to GPU kernels (CUDA, Metal compute shaders, etc.)
+#[pyfunction]
+fn get_data_ptr(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<usize> {
+    let tensor = PyTensor::from_pyany(py, obj)?;
+    Ok(tensor.data_ptr() as usize)
+}
+
+/// Verify tensor metadata matches expected values (useful for GPU tensor validation)
+#[pyfunction]
+fn validate_tensor(
+    py: Python<'_>,
+    obj: &Bound<'_, PyAny>,
+    expected_shape: Vec<i64>,
+    expected_device_type: Option<&str>,
+) -> PyResult<bool> {
+    let tensor = PyTensor::from_pyany(py, obj)?;
+
+    // Check shape
+    if tensor.shape() != expected_shape.as_slice() {
+        return Ok(false);
+    }
+
+    // Check device type if specified
+    if let Some(expected) = expected_device_type {
+        let device = tensor.device();
+        let actual = match device.device_type_enum() {
+            Some(DLDeviceType::Cpu) => "cpu",
+            Some(DLDeviceType::Cuda) => "cuda",
+            Some(DLDeviceType::Metal) => "metal",
+            Some(DLDeviceType::Rocm) => "rocm",
+            _ => "unknown",
+        };
+        if actual != expected {
+            return Ok(false);
+        }
+    }
+
+    Ok(true)
+}
+
+// ============================================================================
 // Demo function
 // ============================================================================
 
@@ -194,7 +292,76 @@ fn demo(py: Python<'_>) -> PyResult<()> {
     let doubled = double_tensor(py, &np_array)?;
     println!("  Doubled tensor: {:?}", doubled);
 
+    // Demo 5: GPU tensor inspection (if PyTorch with CUDA/MPS is available)
+    println!("\nDemo 5: GPU tensor support");
+    demo_gpu_tensors(py)?;
+
     println!("\n=== Demo Complete ===");
+    Ok(())
+}
+
+/// Demo GPU tensor handling
+fn demo_gpu_tensors(py: Python<'_>) -> PyResult<()> {
+    // Try to import torch
+    let torch = match py.import("torch") {
+        Ok(t) => t,
+        Err(_) => {
+            println!("  PyTorch not available, skipping GPU demo");
+            return Ok(());
+        }
+    };
+
+    // Check for CUDA
+    let cuda_available: bool = torch
+        .getattr("cuda")?
+        .getattr("is_available")?
+        .call0()?
+        .extract()?;
+
+    if cuda_available {
+        println!("  CUDA is available!");
+        let cuda_tensor = torch
+            .getattr("randn")?
+            .call1((vec![2i64, 3],))?
+            .call_method1("to", ("cuda:0",))?;
+        println!("  Created CUDA tensor:");
+        inspect_tensor(py, &cuda_tensor)?;
+
+        let device_str = get_device_type(py, &cuda_tensor)?;
+        println!("  Device string: {}", device_str);
+
+        let ptr = get_data_ptr(py, &cuda_tensor)?;
+        println!("  CUDA device pointer: 0x{:x}", ptr);
+    } else {
+        println!("  CUDA not available");
+    }
+
+    // Check for MPS (Metal Performance Shaders - Apple Silicon)
+    let mps_available: bool = torch
+        .getattr("backends")?
+        .getattr("mps")?
+        .getattr("is_available")?
+        .call0()?
+        .extract()?;
+
+    if mps_available {
+        println!("\n  Metal (MPS) is available!");
+        let mps_tensor = torch
+            .getattr("randn")?
+            .call1((vec![2i64, 3],))?
+            .call_method1("to", ("mps:0",))?;
+        println!("  Created MPS tensor:");
+        inspect_tensor(py, &mps_tensor)?;
+
+        let device_str = get_device_type(py, &mps_tensor)?;
+        println!("  Device string: {}", device_str);
+
+        let ptr = get_data_ptr(py, &mps_tensor)?;
+        println!("  Metal device pointer: 0x{:x}", ptr);
+    } else {
+        println!("  Metal (MPS) not available");
+    }
+
     Ok(())
 }
 
@@ -204,12 +371,21 @@ fn demo(py: Python<'_>) -> PyResult<()> {
 
 #[pymodule]
 fn basic_usage(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    // Basic tensor operations
     m.add_function(wrap_pyfunction!(inspect_tensor, m)?)?;
     m.add_function(wrap_pyfunction!(sum_tensor, m)?)?;
     m.add_function(wrap_pyfunction!(create_tensor, m)?)?;
     m.add_function(wrap_pyfunction!(create_filled_tensor, m)?)?;
     m.add_function(wrap_pyfunction!(create_identity, m)?)?;
     m.add_function(wrap_pyfunction!(double_tensor, m)?)?;
+
+    // GPU tensor utilities
+    m.add_function(wrap_pyfunction!(is_gpu_tensor, m)?)?;
+    m.add_function(wrap_pyfunction!(get_device_type, m)?)?;
+    m.add_function(wrap_pyfunction!(get_data_ptr, m)?)?;
+    m.add_function(wrap_pyfunction!(validate_tensor, m)?)?;
+
+    // Demo
     m.add_function(wrap_pyfunction!(demo, m)?)?;
     Ok(())
 }
