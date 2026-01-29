@@ -38,16 +38,43 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
-          cache: pip
-      - name: Install test deps (no torch)
-        run: python -m pip install -e ".[test-lite]"
+      - name: Create venv and install deps (unix)
+        if: runner.os != 'Windows'
+        run: |
+          python -m venv .venv
+          source .venv/bin/activate
+          pip install -e ".[test-lite]"
+      - name: Create venv and install deps (windows)
+        if: runner.os == 'Windows'
+        run: |
+          python -m venv .venv
+          .venv\Scripts\activate
+          pip install -e ".[test-lite]"
       - name: Rust unit tests (unix)
         if: runner.os != 'Windows'
-        run: make test-unit
+        run: |
+          source .venv/bin/activate
+          make test-unit
       - name: Rust unit tests (windows)
         if: runner.os == 'Windows'
         run: cargo test
-      - name: Build test module
-        run: python -m maturin develop
-      - name: Python integration tests
-        run: python -m pytest tests/test_dlpack_integration.py -v
+      - name: Build test module (unix)
+        if: runner.os != 'Windows'
+        run: |
+          source .venv/bin/activate
+          maturin develop --manifest-path tests/python_helpers/Cargo.toml
+      - name: Build test module (windows)
+        if: runner.os == 'Windows'
+        run: |
+          .venv\Scripts\activate
+          maturin develop --manifest-path tests/python_helpers/Cargo.toml
+      - name: Python integration tests (unix)
+        if: runner.os != 'Windows'
+        run: |
+          source .venv/bin/activate
+          pytest tests/test_dlpack_integration.py -v
+      - name: Python integration tests (windows)
+        if: runner.os == 'Windows'
+        run: |
+          .venv\Scripts\activate
+          pytest tests/test_dlpack_integration.py -v
