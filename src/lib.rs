@@ -55,24 +55,19 @@
 //! }
 //! ```
 
+mod export;
 mod ffi;
 mod managed;
-mod export;
 
 // Re-export public API
-pub use ffi::{
-    DLDataType, DLDataTypeCode, DLDevice, DLDeviceType, DLManagedTensor, DLTensor,
-};
-pub use managed::PyTensor;
 pub use export::{IntoDLPack, TensorInfo};
+pub use ffi::{DLDataType, DLDataTypeCode, DLDevice, DLDeviceType, DLManagedTensor, DLTensor};
+pub use managed::PyTensor;
 
 // Convenience constructors
 pub use ffi::{
-    cpu_device, cuda_device, metal_device,
-    dtype_f16, dtype_f32, dtype_f64, dtype_bf16,
-    dtype_i8, dtype_i16, dtype_i32, dtype_i64,
-    dtype_u8, dtype_u16, dtype_u32, dtype_u64,
-    dtype_bool,
+    cpu_device, cuda_device, dtype_bf16, dtype_bool, dtype_f16, dtype_f32, dtype_f64, dtype_i16,
+    dtype_i32, dtype_i64, dtype_i8, dtype_u16, dtype_u32, dtype_u64, dtype_u8, metal_device,
 };
 
 /// The DLPack capsule name for tensor exchange

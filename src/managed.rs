@@ -82,10 +82,12 @@ impl PyTensor {
     pub fn from_pyany(_py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<Self> {
         // Call __dlpack__() to get the capsule
         let capsule_obj = obj.call_method0("__dlpack__")?;
-        let capsule: Bound<'_, PyCapsule> = capsule_obj.cast_into()
-            .map_err(|e| pyo3::exceptions::PyTypeError::new_err(format!(
-                "__dlpack__ did not return a PyCapsule: {:?}", e.into_inner()
-            )))?;
+        let capsule: Bound<'_, PyCapsule> = capsule_obj.cast_into().map_err(|e| {
+            pyo3::exceptions::PyTypeError::new_err(format!(
+                "__dlpack__ did not return a PyCapsule: {:?}",
+                e.into_inner()
+            ))
+        })?;
         Self::from_capsule(&capsule)
     }
 
@@ -178,7 +180,10 @@ impl PyTensor {
             if tensor.strides.is_null() {
                 None
             } else {
-                Some(std::slice::from_raw_parts(tensor.strides, tensor.ndim as usize))
+                Some(std::slice::from_raw_parts(
+                    tensor.strides,
+                    tensor.ndim as usize,
+                ))
             }
         }
     }
@@ -387,7 +392,7 @@ mod tests {
         // Non-contiguous strides (transposed)
         let tensor = TestManagedTensor::new(
             vec![2, 3, 4],
-            Some(vec![1, 2, 6]),  // Column-major like strides
+            Some(vec![1, 2, 6]), // Column-major like strides
             dtype_f32(),
             cpu_device(),
         );
@@ -428,7 +433,7 @@ mod tests {
     #[test]
     fn test_numel_calculation() {
         let shapes_and_expected: Vec<(Vec<i64>, usize)> = vec![
-            (vec![], 1),           // Scalar (product of empty = 1)
+            (vec![], 1), // Scalar (product of empty = 1)
             (vec![5], 5),
             (vec![2, 3], 6),
             (vec![2, 3, 4], 24),
@@ -438,7 +443,7 @@ mod tests {
 
         for (shape, expected) in shapes_and_expected {
             let numel: usize = if shape.is_empty() {
-                1  // Scalar case
+                1 // Scalar case
             } else {
                 shape.iter().map(|&d| d as usize).product()
             };
@@ -467,8 +472,8 @@ mod tests {
 
     #[test]
     fn test_data_ptr_with_offset() {
-        let tensor = TestManagedTensor::new(vec![10], None, dtype_f32(), cpu_device())
-            .with_byte_offset(16);
+        let tensor =
+            TestManagedTensor::new(vec![10], None, dtype_f32(), cpu_device()).with_byte_offset(16);
 
         let managed = unsafe { &*tensor.as_ptr() };
         let base_ptr = managed.dl_tensor.data as usize;
@@ -557,7 +562,7 @@ mod tests {
         Python::attach(|py| {
             // Create a test managed tensor
             let mut shape = vec![2i64, 3];
-            let data = [0u8; 24].to_vec();  // 6 f32 elements
+            let data = [0u8; 24].to_vec(); // 6 f32 elements
 
             let managed = Box::new(DLManagedTensor {
                 dl_tensor: DLTensor {
@@ -578,15 +583,16 @@ mod tests {
             let name = CString::new("dltensor").unwrap();
 
             // Create a PyCapsule with Send wrapper
-            let capsule = PyCapsule::new(py, sendable, Some(name))
-                .expect("Failed to create capsule");
+            let capsule =
+                PyCapsule::new(py, sendable, Some(name)).expect("Failed to create capsule");
 
             // Verify capsule name exists
             let capsule_name = capsule.name().expect("Failed to get name");
             assert!(capsule_name.is_some());
 
             // Extract the pointer back - pointer_checked returns NonNull on success
-            let _extracted = capsule.pointer_checked(Some(DLPACK_CAPSULE_NAME))
+            let _extracted = capsule
+                .pointer_checked(Some(DLPACK_CAPSULE_NAME))
                 .expect("Failed to extract pointer");
 
             // Clean up
@@ -607,8 +613,7 @@ mod tests {
             let data = TestData(42);
             let name = CString::new("wrong_name").unwrap();
 
-            let capsule = PyCapsule::new(py, data, Some(name))
-                .expect("Failed to create capsule");
+            let capsule = PyCapsule::new(py, data, Some(name)).expect("Failed to create capsule");
 
             // Should fail when extracting with wrong expected name
             let result = capsule.pointer_checked(Some(DLPACK_CAPSULE_NAME));
@@ -659,11 +664,19 @@ mod tests {
                     ndim: ctx_ref.shape.len() as i32,
                     dtype,
                     shape: ctx_ref.shape.as_mut_ptr(),
-                    strides: ctx_ref.strides.as_mut().map(|s| s.as_mut_ptr()).unwrap_or(std::ptr::null_mut()),
+                    strides: ctx_ref
+                        .strides
+                        .as_mut()
+                        .map(|s| s.as_mut_ptr())
+                        .unwrap_or(std::ptr::null_mut()),
                     byte_offset,
                 },
                 manager_ctx: ctx_ptr as *mut c_void,
-                deleter: if with_deleter { Some(test_deleter) } else { None },
+                deleter: if with_deleter {
+                    Some(test_deleter)
+                } else {
+                    None
+                },
             });
 
             let managed_ptr = Box::into_raw(managed);
@@ -698,7 +711,8 @@ mod tests {
                 .expect("Failed to create capsule");
 
             // Create PyTensor - need to read the pointer from the capsule correctly
-            let ptr = capsule.pointer_checked(Some(DLPACK_CAPSULE_NAME))
+            let ptr = capsule
+                .pointer_checked(Some(DLPACK_CAPSULE_NAME))
                 .expect("Failed to get pointer");
             // The capsule stores SendableTestPtr, so we need to dereference to get the actual pointer
             let managed_ptr = unsafe { *(ptr.as_ptr() as *const *mut DLManagedTensor) };
@@ -742,7 +756,7 @@ mod tests {
             let ctx = Box::new(TestTensorContext {
                 data: vec![1.0; 24],
                 shape: vec![2, 3, 4],
-                strides: Some(vec![12, 4, 1]),  // Row-major contiguous
+                strides: Some(vec![12, 4, 1]), // Row-major contiguous
             });
 
             let capsule = create_test_capsule(py, ctx, cpu_device(), dtype_f32(), 0, false)
@@ -773,7 +787,7 @@ mod tests {
             let ctx = Box::new(TestTensorContext {
                 data: vec![1.0; 6],
                 shape: vec![2, 3],
-                strides: Some(vec![1, 2]),  // Column-major (non-contiguous for row-major check)
+                strides: Some(vec![1, 2]), // Column-major (non-contiguous for row-major check)
             });
 
             let capsule = create_test_capsule(py, ctx, cpu_device(), dtype_f32(), 0, false)
@@ -888,7 +902,7 @@ mod tests {
         Python::attach(|py| {
             // Use f32 data but declare f64 dtype for testing
             let ctx = Box::new(TestTensorContext {
-                data: vec![1.0; 6],  // 6 f32 = 24 bytes = 3 f64
+                data: vec![1.0; 6], // 6 f32 = 24 bytes = 3 f64
                 shape: vec![3],
                 strides: None,
             });
@@ -919,7 +933,7 @@ mod tests {
             let ctx = Box::new(TestTensorContext {
                 data: vec![1.0],
                 shape: vec![],
-                strides: Some(vec![]),  // Empty strides for scalar
+                strides: Some(vec![]), // Empty strides for scalar
             });
 
             let capsule = create_test_capsule(py, ctx, cpu_device(), dtype_f32(), 0, false)

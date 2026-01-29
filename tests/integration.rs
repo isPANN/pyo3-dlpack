@@ -74,10 +74,7 @@ fn test_capsule_marked_as_used() {
 
         // Check initial name
         let name = capsule.name().unwrap();
-        assert_eq!(
-            unsafe { name.unwrap().as_cstr() }.to_bytes(),
-            b"dltensor"
-        );
+        assert_eq!(unsafe { name.unwrap().as_cstr() }.to_bytes(), b"dltensor");
 
         // Import it (should rename)
         let _tensor = PyTensor::from_capsule(&capsule).expect("Failed to import");

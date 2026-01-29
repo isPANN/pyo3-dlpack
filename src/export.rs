@@ -285,10 +285,8 @@ unsafe extern "C" fn raw_capsule_destructor(capsule_ptr: *mut pyo3::ffi::PyObjec
     }
 
     // Get the DLManagedTensor pointer from the capsule using the current name
-    let managed_ptr = pyo3::ffi::PyCapsule_GetPointer(
-        capsule_ptr,
-        name_ptr,
-    ) as *mut DLManagedTensor;
+    let managed_ptr =
+        pyo3::ffi::PyCapsule_GetPointer(capsule_ptr, name_ptr) as *mut DLManagedTensor;
 
     if managed_ptr.is_null() {
         return;
@@ -394,7 +392,8 @@ mod tests {
                 cpu_device(),
                 dtype_f32(),
                 self.shape.clone(),
-            ).with_byte_offset(self.offset)
+            )
+            .with_byte_offset(self.offset)
         }
     }
 
@@ -468,7 +467,8 @@ mod tests {
             cpu_device(),
             dtype_f32(),
             vec![10],
-        ).with_byte_offset(16);
+        )
+        .with_byte_offset(16);
 
         assert_eq!(info.byte_offset, 16);
     }
@@ -547,7 +547,8 @@ mod tests {
             dtype_f32(),
             vec![2, 5],
             vec![5, 1],
-        ).with_byte_offset(8);
+        )
+        .with_byte_offset(8);
 
         let cloned = info.clone();
         assert_eq!(cloned.shape, info.shape);
@@ -562,7 +563,7 @@ mod tests {
             data.as_ptr() as *mut c_void,
             cpu_device(),
             dtype_f32(),
-            vec![],  // Scalar
+            vec![], // Scalar
         );
         assert!(info.shape.is_empty());
     }
@@ -630,7 +631,7 @@ mod tests {
             let tensor = OffsetTensor {
                 data: vec![1.0; 20],
                 shape: vec![10],
-                offset: 40,  // Skip first 10 f32 elements
+                offset: 40, // Skip first 10 f32 elements
             };
 
             let capsule = tensor.into_dlpack(py).expect("Failed to create capsule");
@@ -643,7 +644,7 @@ mod tests {
         Python::attach(|py| {
             let tensor = TestTensor {
                 data: vec![42.0],
-                shape: vec![],  // Scalar
+                shape: vec![], // Scalar
             };
 
             let capsule = tensor.into_dlpack(py).expect("Failed to create capsule");
@@ -748,7 +749,7 @@ mod tests {
             let tensor = StridedTensor {
                 data: vec![1.0; 6],
                 shape: vec![2, 3],
-                strides: vec![1, 2],  // Column-major
+                strides: vec![1, 2], // Column-major
             };
 
             let capsule = tensor.into_dlpack(py).expect("Failed to create capsule");
@@ -763,7 +764,7 @@ mod tests {
             let tensor = StridedTensor {
                 data: vec![1.0; 3],
                 shape: vec![2, 3],
-                strides: vec![0, 1],  // First dimension is broadcast
+                strides: vec![0, 1], // First dimension is broadcast
             };
 
             let capsule = tensor.into_dlpack(py).expect("Failed to create capsule");

@@ -472,7 +472,10 @@ mod tests {
         let dev = DLDevice::new(DLDeviceType::Rocm, 1);
         assert_eq!(dev.device_type_enum(), Some(DLDeviceType::Rocm));
 
-        let unknown = DLDevice { device_type: 99, device_id: 0 };
+        let unknown = DLDevice {
+            device_type: 99,
+            device_id: 0,
+        };
         assert_eq!(unknown.device_type_enum(), None);
     }
 
@@ -548,7 +551,10 @@ mod tests {
         assert_eq!(DLDataTypeCode::from_raw(0), Some(DLDataTypeCode::Int));
         assert_eq!(DLDataTypeCode::from_raw(1), Some(DLDataTypeCode::UInt));
         assert_eq!(DLDataTypeCode::from_raw(2), Some(DLDataTypeCode::Float));
-        assert_eq!(DLDataTypeCode::from_raw(3), Some(DLDataTypeCode::OpaqueHandle));
+        assert_eq!(
+            DLDataTypeCode::from_raw(3),
+            Some(DLDataTypeCode::OpaqueHandle)
+        );
         assert_eq!(DLDataTypeCode::from_raw(4), Some(DLDataTypeCode::Bfloat));
         assert_eq!(DLDataTypeCode::from_raw(5), Some(DLDataTypeCode::Complex));
         assert_eq!(DLDataTypeCode::from_raw(6), Some(DLDataTypeCode::Bool));
@@ -603,7 +609,11 @@ mod tests {
         let dt = dtype_f32();
         assert_eq!(dt.code_enum(), Some(DLDataTypeCode::Float));
 
-        let unknown = DLDataType { code: 99, bits: 32, lanes: 1 };
+        let unknown = DLDataType {
+            code: 99,
+            bits: 32,
+            lanes: 1,
+        };
         assert_eq!(unknown.code_enum(), None);
     }
 
@@ -727,13 +737,25 @@ mod tests {
     #[test]
     fn test_dtype_itemsize_rounding() {
         // Test rounding up for non-byte-aligned types
-        let one_bit = DLDataType { code: 0, bits: 1, lanes: 1 };
+        let one_bit = DLDataType {
+            code: 0,
+            bits: 1,
+            lanes: 1,
+        };
         assert_eq!(one_bit.itemsize(), 1);
 
-        let seven_bits = DLDataType { code: 0, bits: 7, lanes: 1 };
+        let seven_bits = DLDataType {
+            code: 0,
+            bits: 7,
+            lanes: 1,
+        };
         assert_eq!(seven_bits.itemsize(), 1);
 
-        let nine_bits = DLDataType { code: 0, bits: 9, lanes: 1 };
+        let nine_bits = DLDataType {
+            code: 0,
+            bits: 9,
+            lanes: 1,
+        };
         assert_eq!(nine_bits.itemsize(), 2);
     }
 
