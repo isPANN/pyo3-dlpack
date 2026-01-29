@@ -39,7 +39,7 @@ jobs:
         run: pip install maturin pytest numpy
       - name: Rust unit tests
         run: cargo test --lib
-      - name: Build test module
-        run: maturin develop --manifest-path tests/python_helpers/Cargo.toml
+      - name: Build and install test module
+        run: pip install tests/python_helpers/
       - name: Python integration tests
         run: pytest tests/test_dlpack_integration.py -v
