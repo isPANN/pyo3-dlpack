@@ -41,14 +41,14 @@ bench: bench-rust bench-python
 # Python library directory (for linking during tests)
 PYTHON_LIBDIR := $(shell $(PYTHON) -c "import sysconfig; print(sysconfig.get_config_var('LIBDIR') or '')")
 
-# Run Rust unit tests
+# Run Rust unit tests (lib only, Rust integration tests require numpy via pytest)
 # Set library paths for all platforms: macOS (DYLD), Linux (LD), Windows (PATH)
 test-unit:
 	@echo "Running Rust unit tests..."
 	DYLD_LIBRARY_PATH="$(PYTHON_LIBDIR)" \
 	LD_LIBRARY_PATH="$(PYTHON_LIBDIR)" \
 	PATH="$(PYTHON_LIBDIR):$(PATH)" \
-	cargo test
+	cargo test --lib
 
 # Run all integration tests
 test-integration: build

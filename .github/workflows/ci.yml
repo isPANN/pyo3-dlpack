@@ -37,9 +37,5 @@ jobs:
           python-version: "3.11"
       - name: Install dependencies
         run: pip install -e ".[test-lite]"
-      - name: Rust unit tests
-        run: cargo test --lib
-      - name: Build test module
-        run: maturin develop --manifest-path tests/python_helpers/Cargo.toml
-      - name: Python integration tests
-        run: pytest tests/test_dlpack_integration.py -v
+      - name: Run tests
+        run: make test
