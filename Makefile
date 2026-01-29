@@ -21,11 +21,17 @@ build:
 # Run all tests
 test: test-unit test-integration
 
+# Python library directory (for linking during tests)
+PYTHON_LIBDIR := $(shell python3 -c "import sysconfig; print(sysconfig.get_config_var('LIBDIR') or '')")
+
 # Run Rust unit tests
+# Set library paths for all platforms: macOS (DYLD), Linux (LD), Windows (PATH)
 test-unit:
 	@echo "Running Rust unit tests..."
-	DYLD_LIBRARY_PATH=$$(python3 -c "import sysconfig; print(sysconfig.get_config_var('LIBDIR'))") \
-		cargo test
+	DYLD_LIBRARY_PATH="$(PYTHON_LIBDIR)" \
+	LD_LIBRARY_PATH="$(PYTHON_LIBDIR)" \
+	PATH="$(PYTHON_LIBDIR):$(PATH)" \
+	cargo test
 
 # Run all integration tests
 test-integration: build
