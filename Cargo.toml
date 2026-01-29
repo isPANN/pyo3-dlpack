@@ -1,0 +1,24 @@
+[package]
+name = "pyo3-dlpack"
+version = "0.1.0"
+edition = "2021"
+authors = ["isPANN"]
+description = "Zero-copy DLPack tensor interop for PyO3"
+license = "MIT"
+repository = "https://github.com/isPANN/pyo3-dlpack"
+documentation = "https://docs.rs/pyo3-dlpack"
+readme = "README.md"
+keywords = ["dlpack", "pyo3", "tensor", "pytorch", "numpy"]
+categories = ["development-tools::ffi", "science"]
+rust-version = "1.70"
+
+[dependencies]
+pyo3 = { version = "0.27", default-features = false }
+
+[dev-dependencies]
+pyo3 = { version = "0.27", features = ["auto-initialize"] }
+
+[features]
+default = []
+# Enable extension-module for building Python extensions
+extension-module = ["pyo3/extension-module"]
