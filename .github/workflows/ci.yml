@@ -51,14 +51,14 @@ jobs:
       - name: Rust unit tests (unix)
         if: runner.os != 'Windows'
         env:
-          PYO3_PYTHON: .venv/bin/python
+          PYO3_PYTHON: ${{ github.workspace }}/.venv/bin/python
         run: |
           source .venv/bin/activate
           make test-unit
       - name: Rust unit tests (windows)
         if: runner.os == 'Windows'
         env:
-          PYO3_PYTHON: .venv\Scripts\python.exe
+          PYO3_PYTHON: ${{ github.workspace }}\.venv\Scripts\python.exe
         run: |
           .venv\Scripts\activate
           make test-unit
