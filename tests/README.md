@@ -117,5 +117,6 @@ make bench
 - maturin
 - pytest
 - numpy
-- torch (optional, for PyTorch tests)
+- torch (included in default tests; use `pip install -e ".[test]"`)
+- no-torch CI install: `pip install -e ".[test-lite]"`
 - CUDA (optional, for GPU tests)

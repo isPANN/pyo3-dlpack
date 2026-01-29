@@ -148,6 +148,7 @@ Validate correctness and zero-copy behavior:
 ### Python environment
 The test module is built with `maturin` using the same interpreter as tests.
 Override it with `PYTHON=/path/to/python` if needed (e.g., a venv).
+Default tests include PyTorch (`pip install -e ".[test]"`). For CI or lightweight runs, use `pip install -e ".[test-lite]"`.
 
 ## License
 

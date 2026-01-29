@@ -94,24 +94,25 @@ check_dependencies() {
     fi
     print_success "numpy: installed"
 
-    # Check torch (optional)
+    # Check torch (default for tests)
     if $PYTHON -c "import torch" &> /dev/null; then
         TORCH_VERSION=$($PYTHON -c "import torch; print(torch.__version__)")
         print_success "torch: $TORCH_VERSION"
-
-        # Check CUDA
-        if $PYTHON -c "import torch; exit(0 if torch.cuda.is_available() else 1)" &> /dev/null; then
-            CUDA_VERSION=$($PYTHON -c "import torch; print(torch.version.cuda)")
-            DEVICE_COUNT=$($PYTHON -c "import torch; print(torch.cuda.device_count())")
-            print_success "CUDA: $CUDA_VERSION ($DEVICE_COUNT device(s))"
-            HAS_CUDA=1
-        else
-            print_warning "CUDA not available (GPU tests will be skipped)"
-            HAS_CUDA=0
-        fi
     else
-        print_warning "torch not found (PyTorch tests will be skipped)"
-        print_warning "Install with: pip install torch"
+        print_warning "torch not found, installing..."
+        $PYTHON -m pip install torch
+        TORCH_VERSION=$($PYTHON -c "import torch; print(torch.__version__)")
+        print_success "torch: $TORCH_VERSION"
+    fi
+
+    # Check CUDA
+    if $PYTHON -c "import torch; exit(0 if torch.cuda.is_available() else 1)" &> /dev/null; then
+        CUDA_VERSION=$($PYTHON -c "import torch; print(torch.version.cuda)")
+        DEVICE_COUNT=$($PYTHON -c "import torch; print(torch.cuda.device_count())")
+        print_success "CUDA: $CUDA_VERSION ($DEVICE_COUNT device(s))"
+        HAS_CUDA=1
+    else
+        print_warning "CUDA not available (GPU tests will be skipped)"
         HAS_CUDA=0
     fi
 }

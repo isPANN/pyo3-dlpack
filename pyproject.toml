@@ -16,6 +16,11 @@ test = [
     "torch>=2.0",
     "numpy>=1.20",
 ]
+test-lite = [
+    "maturin>=1.4,<2.0",
+    "pytest>=7.0",
+    "numpy>=1.20",
+]
 
 [tool.maturin]
 manifest-path = "tests/python_helpers/Cargo.toml"
