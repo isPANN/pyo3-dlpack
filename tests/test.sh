@@ -21,7 +21,8 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-cd "$SCRIPT_DIR"
+# Change to project root (parent of tests/)
+cd "$SCRIPT_DIR/.."
 
 # Colors for output
 RED='\033[0;31m'
@@ -151,7 +152,7 @@ clean() {
     print_header "Cleaning build artifacts"
 
     rm -rf target/
-    rm -rf tests/test_module/target/
+    rm -rf tests/python_helpers/target/
     rm -rf *.egg-info/
     rm -rf .pytest_cache/
     rm -rf __pycache__/

@@ -42,8 +42,8 @@ Run with:
 ```bash
 make test-integration
 # or
-./test.sh cpu
-./test.sh gpu    # requires CUDA
+cd tests && ./test.sh cpu
+cd tests && ./test.sh gpu    # requires CUDA
 ```
 
 ## Test Module
