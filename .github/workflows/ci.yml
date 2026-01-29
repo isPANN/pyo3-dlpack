@@ -40,6 +40,9 @@ jobs:
       - name: Rust unit tests
         run: cargo test --lib
       - name: Build and install test module
-        run: pip install tests/python_helpers/
+        shell: bash
+        run: |
+          maturin build --manifest-path tests/python_helpers/Cargo.toml -o dist
+          pip install --no-deps dist/*.whl
       - name: Python integration tests
         run: pytest tests/test_dlpack_integration.py -v
