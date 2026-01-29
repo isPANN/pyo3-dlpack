@@ -6,7 +6,7 @@ This directory contains all tests for the pyo3-dlpack library.
 
 ```
 tests/
-├── test_module/                    # Python extension for integration testing
+├── python_helpers/                 # Python extension for integration testing
 │   ├── Cargo.toml                  # Rust crate config
 │   └── src/lib.rs                  # Test module implementation
 ├── conftest.py                     # pytest configuration
@@ -48,7 +48,7 @@ cd tests && ./test.sh gpu    # requires CUDA
 
 ## Test Module
 
-`test_module/` is a separate Rust crate that compiles to a Python extension module (`dlpack_test_module`). It provides:
+`python_helpers/` is a separate Rust crate that compiles to a Python extension module (`dlpack_test_module`). It provides:
 
 - **Export functions**: Create test tensors and export as DLPack capsules
 - **Import functions**: Import capsules and return metadata for verification
@@ -92,6 +92,23 @@ make test-memory
 ### Stress tests
 ```bash
 make test-stress
+```
+
+## Benchmarks
+
+### Rust benchmarks (Criterion)
+```bash
+make bench-rust
+```
+
+### Python benchmarks
+```bash
+make bench-python
+```
+
+### All benchmarks
+```bash
+make bench
 ```
 
 ## Requirements

@@ -227,7 +227,7 @@ fn export_to_capsule<T: IntoDLPack>(
         pyo3::ffi::PyCapsule_New(
             managed_ptr as *mut c_void,
             DLPACK_CAPSULE_NAME.as_ptr() as *const i8,
-            Some(raw_capsule_destructor::<T>),
+            Some(raw_capsule_destructor),
         )
     };
 
@@ -264,7 +264,7 @@ fn export_to_capsule<T: IntoDLPack>(
 /// This destructor checks the capsule name to avoid double-free:
 /// - If name is "dltensor": capsule was never consumed, we call the deleter
 /// - If name is "used_dltensor": consumer owns it and will call deleter, skip
-unsafe extern "C" fn raw_capsule_destructor<T>(capsule_ptr: *mut pyo3::ffi::PyObject) {
+unsafe extern "C" fn raw_capsule_destructor(capsule_ptr: *mut pyo3::ffi::PyObject) {
     if capsule_ptr.is_null() {
         return;
     }
@@ -429,7 +429,7 @@ mod tests {
 
     #[test]
     fn test_tensor_info_contiguous() {
-        let data = vec![1.0f32, 2.0, 3.0, 4.0];
+        let data = [1.0f32, 2.0, 3.0, 4.0].to_vec();
         let info = TensorInfo::contiguous(
             data.as_ptr() as *mut c_void,
             cpu_device(),
@@ -446,7 +446,7 @@ mod tests {
 
     #[test]
     fn test_tensor_info_strided() {
-        let data = vec![1.0f32; 24];
+        let data = [1.0f32; 24].to_vec();
         let info = TensorInfo::strided(
             data.as_ptr() as *mut c_void,
             cpu_device(),
@@ -462,7 +462,7 @@ mod tests {
 
     #[test]
     fn test_tensor_info_with_byte_offset() {
-        let data = vec![1.0f32; 10];
+        let data = [1.0f32; 10].to_vec();
         let info = TensorInfo::contiguous(
             data.as_ptr() as *mut c_void,
             cpu_device(),
@@ -475,7 +475,7 @@ mod tests {
 
     #[test]
     fn test_tensor_info_with_different_dtypes() {
-        let data_f64 = vec![1.0f64; 10];
+        let data_f64 = [1.0f64; 10].to_vec();
         let info = TensorInfo::contiguous(
             data_f64.as_ptr() as *mut c_void,
             cpu_device(),
@@ -484,7 +484,7 @@ mod tests {
         );
         assert!(info.dtype.is_f64());
 
-        let data_i32 = vec![1i32; 10];
+        let data_i32 = [1i32; 10].to_vec();
         let info = TensorInfo::contiguous(
             data_i32.as_ptr() as *mut c_void,
             cpu_device(),
@@ -496,7 +496,7 @@ mod tests {
 
     #[test]
     fn test_tensor_info_with_different_devices() {
-        let data = vec![1.0f32; 10];
+        let data = [1.0f32; 10].to_vec();
 
         let cpu_info = TensorInfo::contiguous(
             data.as_ptr() as *mut c_void,
@@ -526,7 +526,7 @@ mod tests {
 
     #[test]
     fn test_tensor_info_debug() {
-        let data = vec![1.0f32; 10];
+        let data = [1.0f32; 10].to_vec();
         let info = TensorInfo::contiguous(
             data.as_ptr() as *mut c_void,
             cpu_device(),
@@ -540,7 +540,7 @@ mod tests {
 
     #[test]
     fn test_tensor_info_clone() {
-        let data = vec![1.0f32; 10];
+        let data = [1.0f32; 10].to_vec();
         let info = TensorInfo::strided(
             data.as_ptr() as *mut c_void,
             cpu_device(),
@@ -557,7 +557,7 @@ mod tests {
 
     #[test]
     fn test_tensor_info_empty_shape() {
-        let data = vec![1.0f32];
+        let data = [1.0f32].to_vec();
         let info = TensorInfo::contiguous(
             data.as_ptr() as *mut c_void,
             cpu_device(),
@@ -704,7 +704,7 @@ mod tests {
     fn test_capsule_destructor_null_check() {
         // Test that raw_capsule_destructor handles null safely
         unsafe {
-            raw_capsule_destructor::<TestTensor>(std::ptr::null_mut());
+            raw_capsule_destructor(std::ptr::null_mut());
         }
         // Should not crash
     }

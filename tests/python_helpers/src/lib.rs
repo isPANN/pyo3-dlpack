@@ -5,7 +5,7 @@
 
 use pyo3::prelude::*;
 use pyo3::types::PyCapsule;
-use pyo3_dlpack::{cpu_device, cuda_device, dtype_f32, DLDeviceType, IntoDLPack, PyTensor, TensorInfo};
+use pyo3_dlpack::{cpu_device, cuda_device, dtype_f32, DLDeviceType, DLManagedTensor, IntoDLPack, PyTensor, TensorInfo};
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -223,6 +223,35 @@ fn get_capsule_name(capsule: &Bound<'_, PyCapsule>) -> PyResult<Option<String>> 
             Ok(Some(String::from_utf8_lossy(cstr.to_bytes()).to_string()))
         }
         None => Ok(None),
+    }
+}
+
+// ============================================================================
+// Capsule pointer inspection (for zero-copy verification)
+// ============================================================================
+
+/// Get the data pointer (including byte_offset) from a DLPack capsule.
+#[pyfunction]
+fn capsule_data_ptr(capsule: &Bound<'_, PyCapsule>) -> PyResult<usize> {
+    unsafe {
+        let capsule_ptr = capsule.as_ptr();
+        let name_ptr = pyo3::ffi::PyCapsule_GetName(capsule_ptr);
+        if name_ptr.is_null() {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "Capsule has no name",
+            ));
+        }
+
+        let managed_ptr = pyo3::ffi::PyCapsule_GetPointer(capsule_ptr, name_ptr)
+            as *mut DLManagedTensor;
+        if managed_ptr.is_null() {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "Capsule does not contain DLManagedTensor",
+            ));
+        }
+
+        let managed = &*managed_ptr;
+        Ok(managed.dl_tensor.data as usize + managed.dl_tensor.byte_offset as usize)
     }
 }
 
@@ -553,6 +582,7 @@ fn dlpack_test_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Capsule inspection
     m.add_function(wrap_pyfunction!(is_capsule_consumed, m)?)?;
     m.add_function(wrap_pyfunction!(get_capsule_name, m)?)?;
+    m.add_function(wrap_pyfunction!(capsule_data_ptr, m)?)?;
 
     // Example/Demo functions
     m.add_function(wrap_pyfunction!(inspect_tensor, m)?)?;

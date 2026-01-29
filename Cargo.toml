@@ -17,8 +17,13 @@ pyo3 = { version = "0.27", default-features = false }
 
 [dev-dependencies]
 pyo3 = { version = "0.27", features = ["auto-initialize"] }
+criterion = "0.5"
 
 [features]
 default = []
 # Enable extension-module for building Python extensions
 extension-module = ["pyo3/extension-module"]
+
+[[bench]]
+name = "dlpack"
+harness = false

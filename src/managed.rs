@@ -557,7 +557,7 @@ mod tests {
         Python::attach(|py| {
             // Create a test managed tensor
             let mut shape = vec![2i64, 3];
-            let data = vec![0u8; 24];  // 6 f32 elements
+            let data = [0u8; 24].to_vec();  // 6 f32 elements
 
             let managed = Box::new(DLManagedTensor {
                 dl_tensor: DLTensor {

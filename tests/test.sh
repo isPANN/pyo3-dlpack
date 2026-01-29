@@ -11,7 +11,7 @@
 #
 # Requirements:
 #   - Rust toolchain
-#   - Python 3.9+
+#   - Python 3.9+ (set PYTHON=/path/to/python to override)
 #   - maturin (pip install maturin)
 #   - pytest (pip install pytest)
 #   - numpy (pip install numpy)
@@ -21,6 +21,14 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Prefer venv if present, otherwise fall back to python3
+if [ -z "${PYTHON}" ]; then
+    if [ -x "$SCRIPT_DIR/../.venv/bin/python" ]; then
+        PYTHON="$SCRIPT_DIR/../.venv/bin/python"
+    else
+        PYTHON="python3"
+    fi
+fi
 # Change to project root (parent of tests/)
 cd "$SCRIPT_DIR/.."
 
@@ -59,42 +67,42 @@ check_dependencies() {
     print_success "Rust: $(cargo --version)"
 
     # Check Python
-    if ! command -v python3 &> /dev/null; then
+    if ! command -v "$PYTHON" &> /dev/null; then
         print_error "Python 3 not found"
         exit 1
     fi
-    print_success "Python: $(python3 --version)"
+    print_success "Python: $($PYTHON --version)"
 
     # Check maturin
-    if ! python3 -c "import maturin" &> /dev/null; then
+    if ! $PYTHON -c "import maturin" &> /dev/null; then
         print_warning "maturin not found, installing..."
-        pip install maturin
+        $PYTHON -m pip install maturin
     fi
     print_success "maturin: installed"
 
     # Check pytest
-    if ! python3 -c "import pytest" &> /dev/null; then
+    if ! $PYTHON -c "import pytest" &> /dev/null; then
         print_warning "pytest not found, installing..."
-        pip install pytest
+        $PYTHON -m pip install pytest
     fi
     print_success "pytest: installed"
 
     # Check numpy
-    if ! python3 -c "import numpy" &> /dev/null; then
+    if ! $PYTHON -c "import numpy" &> /dev/null; then
         print_warning "numpy not found, installing..."
-        pip install numpy
+        $PYTHON -m pip install numpy
     fi
     print_success "numpy: installed"
 
     # Check torch (optional)
-    if python3 -c "import torch" &> /dev/null; then
-        TORCH_VERSION=$(python3 -c "import torch; print(torch.__version__)")
+    if $PYTHON -c "import torch" &> /dev/null; then
+        TORCH_VERSION=$($PYTHON -c "import torch; print(torch.__version__)")
         print_success "torch: $TORCH_VERSION"
 
         # Check CUDA
-        if python3 -c "import torch; exit(0 if torch.cuda.is_available() else 1)" &> /dev/null; then
-            CUDA_VERSION=$(python3 -c "import torch; print(torch.version.cuda)")
-            DEVICE_COUNT=$(python3 -c "import torch; print(torch.cuda.device_count())")
+        if $PYTHON -c "import torch; exit(0 if torch.cuda.is_available() else 1)" &> /dev/null; then
+            CUDA_VERSION=$($PYTHON -c "import torch; print(torch.version.cuda)")
+            DEVICE_COUNT=$($PYTHON -c "import torch; print(torch.cuda.device_count())")
             print_success "CUDA: $CUDA_VERSION ($DEVICE_COUNT device(s))"
             HAS_CUDA=1
         else
@@ -113,7 +121,7 @@ build_module() {
     print_header "Building test module"
 
     # Build with maturin in development mode
-    maturin develop
+    "$PYTHON" -m maturin develop
 
     print_success "Test module built successfully"
 }
@@ -144,7 +152,7 @@ run_tests() {
             ;;
     esac
 
-    python3 -m pytest tests/test_dlpack_integration.py $pytest_args
+    $PYTHON -m pytest tests/test_dlpack_integration.py $pytest_args
 }
 
 # Clean build artifacts

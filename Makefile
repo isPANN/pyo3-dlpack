@@ -9,7 +9,7 @@
 #   make build         # Build the test module
 #   make clean         # Clean all artifacts
 
-.PHONY: all build test test-unit test-cpu test-gpu test-integration install clean help
+.PHONY: all build test test-unit test-cpu test-gpu test-integration bench bench-rust bench-python install clean help
 
 # Default target
 all: test
@@ -24,16 +24,19 @@ install:
 		uv sync --extra test; \
 	else \
 		echo "uv not found, using pip..."; \
-		pip install -e ".[test]"; \
+		$(PYTHON) -m pip install -e ".[test]"; \
 	fi
 
 # Build the Python test module from tests/test_module
 build: install
 	@echo "Building test module..."
-	maturin develop
+	$(PYTHON) -m maturin develop
 
 # Run all tests
 test: test-unit test-integration
+
+# Run all benchmarks
+bench: bench-rust bench-python
 
 # Python library directory (for linking during tests)
 PYTHON_LIBDIR := $(shell $(PYTHON) -c "import sysconfig; print(sysconfig.get_config_var('LIBDIR') or '')")
@@ -72,6 +75,19 @@ test-stress: build
 	@echo "Running stress tests..."
 	$(PYTHON) -m pytest tests/test_dlpack_integration.py -v -k "Stress"
 
+# Run Rust benchmarks (Criterion)
+bench-rust:
+	@echo "Running Rust benchmarks..."
+	DYLD_LIBRARY_PATH="$(PYTHON_LIBDIR)" \
+	LD_LIBRARY_PATH="$(PYTHON_LIBDIR)" \
+	PATH="$(PYTHON_LIBDIR):$(PATH)" \
+	cargo bench --bench dlpack
+
+# Run Python benchmarks
+bench-python: build
+	@echo "Running Python benchmarks..."
+	$(PYTHON) benchmarks/bench_dlpack.py --size 1000000 --iters 200
+
 # Clean build artifacts
 clean:
 	@echo "Cleaning..."
@@ -108,6 +124,9 @@ help:
 	@echo "  test-gpu        Run GPU integration tests only"
 	@echo "  test-memory     Run memory safety tests"
 	@echo "  test-stress     Run stress tests"
+	@echo "  bench           Run all benchmarks"
+	@echo "  bench-rust      Run Rust benchmarks (Criterion)"
+	@echo "  bench-python    Run Python benchmarks"
 	@echo "  install         Install test dependencies (uv sync --extra test)"
 	@echo "  build           Build the Python test module"
 	@echo "  clean           Clean all build artifacts"

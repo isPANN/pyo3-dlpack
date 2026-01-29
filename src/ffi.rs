@@ -441,7 +441,7 @@ mod tests {
     fn test_device_type_clone_copy() {
         let dt = DLDeviceType::Cuda;
         let dt2 = dt;
-        let dt3 = dt.clone();
+        let dt3 = dt;
         assert_eq!(dt, dt2);
         assert_eq!(dt, dt3);
     }
@@ -523,7 +523,7 @@ mod tests {
     fn test_device_clone_copy() {
         let dev = cuda_device(1);
         let dev2 = dev;
-        let dev3 = dev.clone();
+        let dev3 = dev;
         assert_eq!(dev, dev2);
         assert_eq!(dev, dev3);
     }
@@ -571,7 +571,7 @@ mod tests {
     fn test_dtype_code_clone_copy() {
         let code = DLDataTypeCode::Float;
         let code2 = code;
-        let code3 = code.clone();
+        let code3 = code;
         assert_eq!(code, code2);
         assert_eq!(code, code3);
     }
@@ -750,7 +750,7 @@ mod tests {
     fn test_dtype_clone_copy() {
         let dt = dtype_f32();
         let dt2 = dt;
-        let dt3 = dt.clone();
+        let dt3 = dt;
         assert_eq!(dt, dt2);
         assert_eq!(dt, dt3);
     }

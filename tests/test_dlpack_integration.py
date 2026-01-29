@@ -5,9 +5,8 @@ Tests both CPU and GPU paths for:
 1. Import: Python framework tensor -> DLPack capsule -> Rust PyTensor
 2. Capsule ownership protocol (no double-free, no use-after-free)
 
-Note: Export tests (Rust -> Python) are limited because the current implementation
-stores the DLManagedTensor in a wrapper type, which causes issues with torch/numpy.
-These tests focus on verifying the import path and capsule ownership fixes.
+These tests cover both import (Python -> Rust) and export (Rust -> Python) paths,
+including zero-copy pointer checks where possible.
 
 Run with: pytest tests/test_dlpack_integration.py -v
 """
@@ -66,6 +65,13 @@ class TestCpuImport:
         assert info["is_contiguous"] == True
         assert info["is_cpu"] == True
         assert info["is_cuda"] == False
+
+    def test_import_numpy_zero_copy_ptr(self):
+        """Verify numpy -> Rust import shares the same data pointer (zero-copy)."""
+        arr = np.arange(16, dtype=np.float32).reshape(4, 4)
+        np_ptr = arr.__array_interface__["data"][0]
+        rust_ptr = dtm.get_data_ptr(arr)
+        assert rust_ptr == np_ptr
 
     def test_import_numpy_1d_tensor(self):
         """Import a 1D numpy array."""
@@ -162,6 +168,31 @@ class TestCpuImport:
         # Second import should fail (capsule renamed to used_dltensor)
         with pytest.raises(Exception):
             dtm.import_from_capsule(capsule)
+
+
+# ============================================================================
+# CPU Path Tests - Export (Rust -> Python)
+# ============================================================================
+
+class TestCpuExport:
+    """Test exporting CPU tensors from Rust to Python."""
+
+    def test_export_to_numpy_zero_copy_ptr(self):
+        """Verify Rust export -> numpy from_dlpack shares the same data pointer."""
+        capsule = dtm.export_cpu_tensor()
+        capsule_ptr = dtm.capsule_data_ptr(capsule)
+
+        class _CapsuleWrapper:
+            def __init__(self, cap):
+                self._cap = cap
+
+            def __dlpack__(self):
+                return self._cap
+
+        arr = np.from_dlpack(_CapsuleWrapper(capsule))
+        np_ptr = arr.__array_interface__["data"][0]
+
+        assert np_ptr == capsule_ptr
 
 
 # ============================================================================
