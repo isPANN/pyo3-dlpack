@@ -115,11 +115,22 @@ impl PyTensor {
         //
         // We use a static string because PyCapsule_SetName stores the pointer
         // directly without copying.
-        unsafe {
+        //
+        // SAFETY: We must check the return value. If PyCapsule_SetName fails:
+        // - Returns -1 and sets a Python exception
+        // - The capsule name remains "dltensor", enabling double-consume/double-free
+        let set_name_result = unsafe {
             pyo3::ffi::PyCapsule_SetName(
                 capsule.as_ptr(),
                 USED_DLTENSOR_NAME.as_ptr() as *const c_char,
-            );
+            )
+        };
+        if set_name_result != 0 {
+            // PyCapsule_SetName failed (returns -1 on error)
+            // A Python exception is already set, convert it to PyErr
+            return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                "Failed to mark DLPack capsule as consumed: PyCapsule_SetName failed",
+            ));
         }
 
         Ok(Self {

@@ -47,6 +47,11 @@ impl TensorInfo {
     }
 
     /// Create tensor info with explicit strides.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `strides.len() != shape.len()`. This invariant is required by
+    /// DLPack consumers which will read `strides[i]` for each dimension `i`.
     pub fn strided(
         data: *mut c_void,
         device: DLDevice,
@@ -54,6 +59,13 @@ impl TensorInfo {
         shape: Vec<i64>,
         strides: Vec<i64>,
     ) -> Self {
+        assert_eq!(
+            strides.len(),
+            shape.len(),
+            "strides length ({}) must equal shape length ({})",
+            strides.len(),
+            shape.len()
+        );
         Self {
             data,
             device,
@@ -149,6 +161,19 @@ fn export_to_capsule<T: IntoDLPack>(
     tensor: T,
     info: TensorInfo,
 ) -> PyResult<Py<PyAny>> {
+    // Validate strides length matches shape length to prevent out-of-bounds reads
+    // by DLPack consumers. This catches cases where TensorInfo is constructed
+    // manually without using the strided() constructor.
+    if let Some(ref strides) = info.strides {
+        if strides.len() != info.shape.len() {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "strides length ({}) must equal shape length ({})",
+                strides.len(),
+                info.shape.len()
+            )));
+        }
+    }
+
     // Create the context that will own the tensor
     let ctx = Box::new(ExportContext {
         tensor,
@@ -158,20 +183,35 @@ fn export_to_capsule<T: IntoDLPack>(
     let ctx_ptr = Box::into_raw(ctx);
 
     // Create the DLManagedTensor
+    // SAFETY: For scalar tensors (ndim == 0), shape and strides pointers MUST be null.
+    // Using as_mut_ptr() on an empty Vec returns a non-null dangling pointer, which
+    // violates the DLPack spec and can cause UB if consumers read the pointer.
+    let ndim = unsafe { (*ctx_ptr).shape.len() as i32 };
+    let shape_ptr = if ndim == 0 {
+        std::ptr::null_mut()
+    } else {
+        unsafe { (*ctx_ptr).shape.as_mut_ptr() }
+    };
+    let strides_ptr = if ndim == 0 {
+        std::ptr::null_mut()
+    } else {
+        unsafe {
+            (*ctx_ptr)
+                .strides
+                .as_mut()
+                .map(|s| s.as_mut_ptr())
+                .unwrap_or(std::ptr::null_mut())
+        }
+    };
+
     let managed = Box::new(DLManagedTensor {
         dl_tensor: DLTensor {
             data: info.data,
             device: info.device,
-            ndim: unsafe { (*ctx_ptr).shape.len() as i32 },
+            ndim,
             dtype: info.dtype,
-            shape: unsafe { (*ctx_ptr).shape.as_mut_ptr() },
-            strides: unsafe {
-                (*ctx_ptr)
-                    .strides
-                    .as_mut()
-                    .map(|s| s.as_mut_ptr())
-                    .unwrap_or(std::ptr::null_mut())
-            },
+            shape: shape_ptr,
+            strides: strides_ptr,
             byte_offset: info.byte_offset,
         },
         manager_ctx: ctx_ptr as *mut c_void,
@@ -192,9 +232,13 @@ fn export_to_capsule<T: IntoDLPack>(
     };
 
     if capsule_ptr.is_null() {
-        // Clean up on failure
+        // Clean up on failure - must free BOTH managed_ptr AND ctx_ptr
+        // to avoid memory leak. ctx_ptr owns the tensor and is stored
+        // in managed.manager_ctx, but freeing managed_ptr alone doesn't
+        // automatically free ctx_ptr since it's a raw pointer.
         unsafe {
             let _ = Box::from_raw(managed_ptr);
+            let _ = Box::from_raw(ctx_ptr);
         }
         return Err(pyo3::exceptions::PyMemoryError::new_err(
             "Failed to create DLPack capsule",
