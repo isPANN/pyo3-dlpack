@@ -115,7 +115,7 @@ tensor = torch.from_dlpack(capsule)
 
 ## Performance
 
-DLPack enables true zero-copy tensor sharing. Benchmark results on Apple M3 Max:
+DLPack enables true zero-copy tensor sharing. Benchmark results on Apple M3:
 
 | Operation | Time | vs Copy |
 |-----------|------|---------|
