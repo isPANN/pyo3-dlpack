@@ -57,7 +57,7 @@ jobs:
           make test-unit
       - name: Rust unit tests (windows)
         if: runner.os == 'Windows'
-        run: cargo test
+        run: cargo test --lib
       - name: Build test module (unix)
         if: runner.os != 'Windows'
         run: |
