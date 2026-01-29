@@ -2,13 +2,14 @@
 #
 # Usage:
 #   make test          # Run all tests (unit + integration)
+#   make install       # Install test dependencies
 #   make test-unit     # Run Rust unit tests only
 #   make test-cpu      # Run CPU integration tests
 #   make test-gpu      # Run GPU integration tests
 #   make build         # Build the test module
 #   make clean         # Clean all artifacts
 
-.PHONY: all build test test-unit test-cpu test-gpu test-integration clean help
+.PHONY: all build test test-unit test-cpu test-gpu test-integration install clean help
 
 # Default target
 all: test
@@ -16,8 +17,18 @@ all: test
 # Detect Python command (prefer venv if available)
 PYTHON := $(shell if [ -f .venv/bin/python ]; then echo .venv/bin/python; else echo python3; fi)
 
+# Install test dependencies
+install:
+	@echo "Installing test dependencies..."
+	@if command -v uv >/dev/null 2>&1; then \
+		uv sync --extra test; \
+	else \
+		echo "uv not found, using pip..."; \
+		pip install -e ".[test]"; \
+	fi
+
 # Build the Python test module from tests/test_module
-build:
+build: install
 	@echo "Building test module..."
 	maturin develop
 
@@ -97,6 +108,7 @@ help:
 	@echo "  test-gpu        Run GPU integration tests only"
 	@echo "  test-memory     Run memory safety tests"
 	@echo "  test-stress     Run stress tests"
+	@echo "  install         Install test dependencies (uv sync --extra test)"
 	@echo "  build           Build the Python test module"
 	@echo "  clean           Clean all build artifacts"
 	@echo "  check           Run cargo check and clippy"
