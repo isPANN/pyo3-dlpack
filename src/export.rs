@@ -155,12 +155,15 @@ static DLPACK_CAPSULE_NAME: &[u8] = b"dltensor\0";
 /// Using a static byte array with null terminator for C compatibility
 static USED_DLTENSOR_NAME: &[u8] = b"used_dltensor\0";
 
-/// Export a tensor to a PyCapsule.
-fn export_to_capsule<T: IntoDLPack>(
-    py: Python<'_>,
+/// Build the owning context and the `DLTensor` descriptor shared by both the
+/// legacy and versioned export paths.
+///
+/// On success returns the raw context pointer (the caller takes ownership and
+/// must free it if capsule creation later fails) and the populated `DLTensor`.
+fn build_export_parts<T: IntoDLPack>(
     tensor: T,
     info: TensorInfo,
-) -> PyResult<Py<PyAny>> {
+) -> PyResult<(*mut ExportContext<T>, DLTensor)> {
     // Validate strides length matches shape length to prevent out-of-bounds reads
     // by DLPack consumers. This catches cases where TensorInfo is constructed
     // manually without using the strided() constructor.
@@ -182,7 +185,6 @@ fn export_to_capsule<T: IntoDLPack>(
     });
     let ctx_ptr = Box::into_raw(ctx);
 
-    // Create the DLManagedTensor
     // SAFETY: For scalar tensors (ndim == 0), shape and strides pointers MUST be null.
     // Using as_mut_ptr() on an empty Vec returns a non-null dangling pointer, which
     // violates the DLPack spec and can cause UB if consumers read the pointer.
@@ -204,20 +206,32 @@ fn export_to_capsule<T: IntoDLPack>(
         }
     };
 
+    let dl_tensor = DLTensor {
+        data: info.data,
+        device: info.device,
+        ndim,
+        dtype: info.dtype,
+        shape: shape_ptr,
+        strides: strides_ptr,
+        byte_offset: info.byte_offset,
+    };
+
+    Ok((ctx_ptr, dl_tensor))
+}
+
+/// Export a tensor to a PyCapsule.
+fn export_to_capsule<T: IntoDLPack>(
+    py: Python<'_>,
+    tensor: T,
+    info: TensorInfo,
+) -> PyResult<Py<PyAny>> {
+    let (ctx_ptr, dl_tensor) = build_export_parts(tensor, info)?;
+
     let managed = Box::new(DLManagedTensor {
-        dl_tensor: DLTensor {
-            data: info.data,
-            device: info.device,
-            ndim,
-            dtype: info.dtype,
-            shape: shape_ptr,
-            strides: strides_ptr,
-            byte_offset: info.byte_offset,
-        },
+        dl_tensor,
         manager_ctx: ctx_ptr as *mut c_void,
         deleter: Some(dlpack_deleter::<T>),
     });
-
     let managed_ptr = Box::into_raw(managed);
 
     // Create the PyCapsule using low-level FFI to ensure the pointer is stored directly.
@@ -232,10 +246,7 @@ fn export_to_capsule<T: IntoDLPack>(
     };
 
     if capsule_ptr.is_null() {
-        // Clean up on failure - must free BOTH managed_ptr AND ctx_ptr
-        // to avoid memory leak. ctx_ptr owns the tensor and is stored
-        // in managed.manager_ctx, but freeing managed_ptr alone doesn't
-        // automatically free ctx_ptr since it's a raw pointer.
+        // Clean up on failure - must free BOTH managed_ptr AND ctx_ptr.
         unsafe {
             let _ = Box::from_raw(managed_ptr);
             let _ = Box::from_raw(ctx_ptr);
@@ -251,7 +262,6 @@ fn export_to_capsule<T: IntoDLPack>(
         pyo3::ffi::PyCapsule_SetContext(capsule_ptr, ctx_ptr as *mut c_void);
     }
 
-    // Convert to PyObject
     Ok(unsafe { Bound::from_owned_ptr(py, capsule_ptr).unbind() })
 }
 
