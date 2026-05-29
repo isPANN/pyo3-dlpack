@@ -17,6 +17,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+- Raised the `pytest` floor in the `test`/`test-lite` extras from `>=7.0` to
+  `>=9.0.3` to exclude versions affected by CVE-2025-71176 (tmpdir handling)
+  and pull in a patched `Pygments` (CVE-2026-4539). Test-only dependencies —
+  not shipped with the published crate.
+
 ### Added
 - `CHANGELOG.md` following the Keep a Changelog format.
 - CI: MSRV job (Rust 1.83) verifying the crate builds on the declared

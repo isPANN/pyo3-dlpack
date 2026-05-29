@@ -12,13 +12,13 @@ dependencies = []
 [project.optional-dependencies]
 test = [
     "maturin>=1.4,<2.0",
-    "pytest>=7.0",
+    "pytest>=9.0.3",
     "torch>=2.0",
     "numpy>=1.20",
 ]
 test-lite = [
     "maturin>=1.4,<2.0",
-    "pytest>=7.0",
+    "pytest>=9.0.3",
     "numpy>=1.20",
 ]
 
