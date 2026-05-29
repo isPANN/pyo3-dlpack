@@ -196,13 +196,17 @@ impl PyTensor {
                 pyo3::exceptions::PyValueError::new_err("DLPack capsule contains null pointer")
             })?;
 
-        // Reject protocol versions newer than we understand, per the DLPack spec:
-        // a higher major version may reinterpret the struct layout.
+        // Reject ANY major-version mismatch, per the DLPack spec: a different
+        // major version may lay out the struct body (flags, dl_tensor)
+        // differently, so we must not read past the version field. Minor
+        // versions are ABI-compatible, so they are accepted. We return before
+        // renaming the capsule, leaving the producer's destructor to call the
+        // deleter (which lives at a stable offset across major versions).
         let version = unsafe { managed.as_ref().version };
-        if version.major > DLPACK_MAJOR_VERSION {
+        if version.major != DLPACK_MAJOR_VERSION {
             return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                "unsupported DLPack version {}.{} (this build supports up to {}.{})",
-                version.major, version.minor, DLPACK_MAJOR_VERSION, DLPACK_MINOR_VERSION
+                "unsupported DLPack major version {}.{} (this build supports major version {})",
+                version.major, version.minor, DLPACK_MAJOR_VERSION
             )));
         }
 
@@ -1255,6 +1259,57 @@ mod tests {
                 let _ = Box::from_raw(managed_ptr);
             }
             // Keep the backing arrays alive until after the pointers are done.
+            drop(shape);
+            drop(data);
+        });
+    }
+
+    #[test]
+    fn test_versioned_rejects_mismatched_lower_major() {
+        Python::attach(|py| {
+            // A versioned capsule claiming a major version LOWER than ours
+            // (e.g. 0) is malformed/ABI-incompatible and must be rejected too —
+            // we must not read flags/dl_tensor at our assumed offsets.
+            let mut shape = vec![1i64];
+            let data = vec![0.0f32];
+            let managed = Box::new(DLManagedTensorVersioned {
+                version: crate::ffi::DLPackVersion {
+                    major: DLPACK_MAJOR_VERSION - 1,
+                    minor: 0,
+                },
+                manager_ctx: std::ptr::null_mut(),
+                deleter: None,
+                flags: 0,
+                dl_tensor: DLTensor {
+                    data: data.as_ptr() as *mut c_void,
+                    device: cpu_device(),
+                    ndim: 1,
+                    dtype: dtype_f32(),
+                    shape: shape.as_mut_ptr(),
+                    strides: std::ptr::null_mut(),
+                    byte_offset: 0,
+                },
+            });
+            let managed_ptr = Box::into_raw(managed);
+            let capsule_ptr = unsafe {
+                pyo3::ffi::PyCapsule_New(
+                    managed_ptr as *mut c_void,
+                    c"dltensor_versioned".as_ptr(),
+                    None,
+                )
+            };
+            assert!(!capsule_ptr.is_null());
+            let capsule: Bound<'_, PyCapsule> = unsafe { Bound::from_owned_ptr(py, capsule_ptr) }
+                .cast_into()
+                .unwrap();
+
+            let result = PyTensor::from_capsule(&capsule);
+            assert!(result.is_err());
+
+            // from_capsule rejected before consuming, so reclaim the box ourselves.
+            unsafe {
+                let _ = Box::from_raw(managed_ptr);
+            }
             drop(shape);
             drop(data);
         });
