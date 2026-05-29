@@ -12,6 +12,7 @@ the [DLPack](https://github.com/dmlc/dlpack) protocol.
 - **PyO3 0.28+**: Uses the modern API (no deprecation warnings)
 - **Bidirectional**: Import tensors from Python and export tensors to Python
 - **Device-agnostic**: Works with CPU, CUDA, ROCm, and other devices
+- **DLPack 1.0**: Versioned protocol with read-only tensors — auto-negotiated on import, fully backward-compatible with legacy producers
 
 ## Installation
 
@@ -38,6 +39,12 @@ fn process_tensor(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<()> {
     println!("Shape: {:?}", tensor.shape());
     println!("Device: {:?}", tensor.device());
     println!("Dtype: {:?}", tensor.dtype());
+
+    // Respect the producer's read-only flag (DLPack 1.0); legacy producers
+    // always report `false`.
+    if tensor.is_read_only() {
+        // Treat the data as immutable.
+    }
 
     if tensor.device().is_cpu() {
         // Safe to access data on CPU
@@ -164,8 +171,9 @@ Run benchmarks yourself:
 ## Testing
 
 Validate correctness and zero-copy behavior:
-- `make test` - Unit + integration tests (105 tests)
-- Tests verify data pointers are preserved across transfers
+- `make test` - Rust unit tests + Python integration tests
+- Tests verify data pointers are preserved across transfers, capsule
+  ownership (no double-free), and the versioned/read-only round-trip
 
 ### Python environment
 The test module is built with `maturin` using the same interpreter as tests.
