@@ -108,8 +108,22 @@ impl PyTensor {
     /// - The returned capsule is invalid
     /// - The capsule doesn't contain a valid DLManagedTensor
     pub fn from_pyany(_py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<Self> {
-        // Call __dlpack__() to get the capsule
-        let capsule_obj = obj.call_method0("__dlpack__")?;
+        let py = obj.py();
+
+        // Advertise versioned support via max_version. Producers whose
+        // __dlpack__ predates the kwarg raise TypeError; fall back to a no-arg
+        // call for them. The actual capsule kind is decided later by name.
+        let kwargs = pyo3::types::PyDict::new(py);
+        kwargs.set_item("max_version", (DLPACK_MAJOR_VERSION, DLPACK_MINOR_VERSION))?;
+
+        let capsule_obj = match obj.call_method("__dlpack__", (), Some(&kwargs)) {
+            Ok(c) => c,
+            Err(e) if e.is_instance_of::<pyo3::exceptions::PyTypeError>(py) => {
+                obj.call_method0("__dlpack__")?
+            }
+            Err(e) => return Err(e),
+        };
+
         let capsule: Bound<'_, PyCapsule> = capsule_obj.cast_into().map_err(|e| {
             pyo3::exceptions::PyTypeError::new_err(format!(
                 "__dlpack__ did not return a PyCapsule: {:?}",
