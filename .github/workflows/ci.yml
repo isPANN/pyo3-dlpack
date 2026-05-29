@@ -21,6 +21,32 @@ jobs:
       - name: Clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
 
+  msrv:
+    name: MSRV (1.83)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@1.83
+      - uses: Swatinem/rust-cache@v2
+      # Check the library against the declared rust-version in Cargo.toml.
+      # Dev-dependencies (criterion) may require a newer toolchain, so we
+      # deliberately scope this to the public crate, not --all-targets.
+      - name: Cargo check (all features)
+        run: cargo check --all-features
+
+  semver:
+    name: Semver checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Compares the current API surface against the latest version published
+      # on crates.io and fails if the change is more breaking than the version
+      # bump implies. Prevents accidental breaking changes in patch/minor releases.
+      - name: Check semver compatibility
+        uses: obi1kenobi/cargo-semver-checks-action@v2
+
   test:
     name: Tests (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
