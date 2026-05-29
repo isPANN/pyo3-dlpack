@@ -800,13 +800,23 @@ mod tests {
                 .into_dlpack_readonly(py)
                 .expect("Failed to create read-only capsule");
 
-            // A read-only export must produce a versioned capsule.
-            let name = unsafe {
+            // A read-only export must produce a versioned capsule whose managed
+            // tensor actually carries the read-only flag and the protocol version.
+            unsafe {
                 let name_ptr = pyo3::ffi::PyCapsule_GetName(capsule.as_ptr());
                 assert!(!name_ptr.is_null());
-                CStr::from_ptr(name_ptr).to_owned()
-            };
-            assert_eq!(name.to_bytes(), b"dltensor_versioned");
+                let name = CStr::from_ptr(name_ptr);
+                assert_eq!(name.to_bytes(), b"dltensor_versioned");
+
+                let managed_ptr = pyo3::ffi::PyCapsule_GetPointer(capsule.as_ptr(), name_ptr)
+                    as *mut DLManagedTensorVersioned;
+                assert!(!managed_ptr.is_null());
+                assert_eq!(
+                    (*managed_ptr).flags & DLPACK_FLAG_BITMASK_READ_ONLY,
+                    DLPACK_FLAG_BITMASK_READ_ONLY
+                );
+                assert_eq!((*managed_ptr).version.major, DLPACK_MAJOR_VERSION);
+            }
         });
     }
 
@@ -853,6 +863,22 @@ mod tests {
             raw_capsule_destructor(std::ptr::null_mut());
         }
         // Should not crash
+    }
+
+    #[test]
+    fn test_versioned_deleter_null_check() {
+        // Versioned deleter must handle a null pointer safely.
+        unsafe {
+            dlpack_deleter_versioned::<TestTensor>(std::ptr::null_mut());
+        }
+    }
+
+    #[test]
+    fn test_versioned_capsule_destructor_null_check() {
+        // Versioned capsule destructor must handle a null pointer safely.
+        unsafe {
+            raw_capsule_destructor_versioned(std::ptr::null_mut());
+        }
     }
 
     // ========================================================================
