@@ -7,10 +7,10 @@ use crate::ffi::{
     DLDataType, DLDevice, DLManagedTensor, DLManagedTensorVersioned, DLTensor,
     DLPACK_FLAG_BITMASK_READ_ONLY, DLPACK_MAJOR_VERSION, DLPACK_MINOR_VERSION,
 };
-use crate::DLPACK_CAPSULE_NAME;
+use crate::{DLPACK_CAPSULE_NAME, DLPACK_VERSIONED_CAPSULE_NAME};
 use pyo3::prelude::*;
 use pyo3::types::PyCapsule;
-use std::ffi::{c_char, c_void};
+use std::ffi::{c_char, c_void, CStr};
 use std::ptr::NonNull;
 
 /// The name for consumed DLPack capsules (per DLPack protocol).
@@ -18,6 +18,9 @@ use std::ptr::NonNull;
 /// This must remain valid for the lifetime of the program since PyCapsule_SetName
 /// stores the pointer directly without copying.
 static USED_DLTENSOR_NAME: &[u8] = b"used_dltensor\0";
+
+/// The name for consumed versioned DLPack capsules (per DLPack protocol).
+static USED_DLTENSOR_VERSIONED_NAME: &[u8] = b"used_dltensor_versioned\0";
 
 /// Which managed-tensor layout backs a [`PyTensor`].
 ///
@@ -126,26 +129,39 @@ impl PyTensor {
     ///
     /// Returns an error if the capsule is invalid or has the wrong name.
     pub fn from_capsule(capsule: &Bound<'_, PyCapsule>) -> PyResult<Self> {
-        // Extract the pointer using pointer_checked which also validates the capsule name.
-        // This will fail if the capsule was already consumed (name is "used_dltensor").
+        // Decide which DLPack layout this capsule carries by reading its name.
+        // A producer may return a legacy capsule even when versioned was
+        // requested, so we dispatch on the actual name, never on assumptions.
+        let name_ptr = unsafe { pyo3::ffi::PyCapsule_GetName(capsule.as_ptr()) };
+        if name_ptr.is_null() {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "DLPack capsule has no name",
+            ));
+        }
+        let name = unsafe { CStr::from_ptr(name_ptr) };
+        let name_bytes = name.to_bytes();
+
+        if name_bytes == DLPACK_CAPSULE_NAME.to_bytes() {
+            Self::from_unversioned_capsule(capsule)
+        } else if name_bytes == DLPACK_VERSIONED_CAPSULE_NAME.to_bytes() {
+            Self::from_versioned_capsule(capsule)
+        } else {
+            Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "unexpected DLPack capsule name: {:?}",
+                name
+            )))
+        }
+    }
+
+    /// Consume an unversioned (`dltensor`) capsule.
+    fn from_unversioned_capsule(capsule: &Bound<'_, PyCapsule>) -> PyResult<Self> {
         let ptr = capsule.pointer_checked(Some(DLPACK_CAPSULE_NAME))?;
         let managed = NonNull::new(ptr.as_ptr() as *mut DLManagedTensor).ok_or_else(|| {
             pyo3::exceptions::PyValueError::new_err("DLPack capsule contains null pointer")
         })?;
 
-        // Per DLPack protocol, rename the capsule to "used_dltensor" to indicate
-        // we have taken ownership. This prevents:
-        // 1. Multiple consumers from using the same capsule (second consumer
-        //    will fail the name check above)
-        // 2. The producer's capsule destructor from calling the deleter
-        //    (it checks for this name and skips the deleter call)
-        //
-        // We use a static string because PyCapsule_SetName stores the pointer
-        // directly without copying.
-        //
-        // SAFETY: We must check the return value. If PyCapsule_SetName fails:
-        // - Returns -1 and sets a Python exception
-        // - The capsule name remains "dltensor", enabling double-consume/double-free
+        // Per DLPack protocol, rename to "used_dltensor" to take ownership and
+        // prevent double-consume / double-free.
         let set_name_result = unsafe {
             pyo3::ffi::PyCapsule_SetName(
                 capsule.as_ptr(),
@@ -153,8 +169,6 @@ impl PyTensor {
             )
         };
         if set_name_result != 0 {
-            // PyCapsule_SetName failed (returns -1 on error)
-            // A Python exception is already set, convert it to PyErr
             return Err(pyo3::exceptions::PyRuntimeError::new_err(
                 "Failed to mark DLPack capsule as consumed: PyCapsule_SetName failed",
             ));
@@ -162,6 +176,42 @@ impl PyTensor {
 
         Ok(Self {
             managed: ManagedPtr::Unversioned(managed),
+            capsule: capsule.clone().unbind(),
+        })
+    }
+
+    /// Consume a versioned (`dltensor_versioned`) capsule.
+    fn from_versioned_capsule(capsule: &Bound<'_, PyCapsule>) -> PyResult<Self> {
+        let ptr = capsule.pointer_checked(Some(DLPACK_VERSIONED_CAPSULE_NAME))?;
+        let managed =
+            NonNull::new(ptr.as_ptr() as *mut DLManagedTensorVersioned).ok_or_else(|| {
+                pyo3::exceptions::PyValueError::new_err("DLPack capsule contains null pointer")
+            })?;
+
+        // Reject protocol versions newer than we understand, per the DLPack spec:
+        // a higher major version may reinterpret the struct layout.
+        let version = unsafe { managed.as_ref().version };
+        if version.major > DLPACK_MAJOR_VERSION {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "unsupported DLPack version {}.{} (this build supports up to {}.{})",
+                version.major, version.minor, DLPACK_MAJOR_VERSION, DLPACK_MINOR_VERSION
+            )));
+        }
+
+        let set_name_result = unsafe {
+            pyo3::ffi::PyCapsule_SetName(
+                capsule.as_ptr(),
+                USED_DLTENSOR_VERSIONED_NAME.as_ptr() as *const c_char,
+            )
+        };
+        if set_name_result != 0 {
+            return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                "Failed to mark DLPack capsule as consumed: PyCapsule_SetName failed",
+            ));
+        }
+
+        Ok(Self {
+            managed: ManagedPtr::Versioned(managed),
             capsule: capsule.clone().unbind(),
         })
     }
@@ -262,6 +312,19 @@ impl PyTensor {
     /// Get the total size of the tensor data in bytes.
     pub fn nbytes(&self) -> usize {
         self.numel() * self.itemsize()
+    }
+
+    /// Whether the tensor is marked read-only.
+    ///
+    /// Only versioned (DLPack 1.0) tensors can carry this flag; legacy tensors
+    /// always report `false`.
+    pub fn is_read_only(&self) -> bool {
+        match self.managed {
+            ManagedPtr::Unversioned(_) => false,
+            ManagedPtr::Versioned(p) => unsafe {
+                p.as_ref().flags & DLPACK_FLAG_BITMASK_READ_ONLY != 0
+            },
+        }
     }
 }
 
@@ -1047,6 +1110,65 @@ mod tests {
                     let _ = Box::from_raw(managed.manager_ctx as *mut TestTensorContext);
                 }
             }
+        });
+    }
+
+    // ========================================================================
+    // Versioned / read-only round-trip tests
+    // ========================================================================
+
+    struct RoundTripTensor {
+        data: Vec<f32>,
+        shape: Vec<i64>,
+    }
+
+    impl crate::IntoDLPack for RoundTripTensor {
+        fn tensor_info(&self) -> crate::TensorInfo {
+            crate::TensorInfo::contiguous(
+                self.data.as_ptr() as *mut c_void,
+                cpu_device(),
+                dtype_f32(),
+                self.shape.clone(),
+            )
+        }
+    }
+
+    #[test]
+    fn test_roundtrip_versioned_readonly() {
+        use crate::IntoDLPack;
+        Python::attach(|py| {
+            let t = RoundTripTensor {
+                data: vec![1.0, 2.0, 3.0, 4.0],
+                shape: vec![2, 2],
+            };
+            let capsule_obj = t.into_dlpack_readonly(py).unwrap();
+            let bound = capsule_obj.into_bound(py);
+            let capsule: Bound<'_, PyCapsule> = bound.cast_into().unwrap();
+
+            let tensor = PyTensor::from_capsule(&capsule).unwrap();
+            assert!(tensor.is_read_only());
+            assert_eq!(tensor.shape(), &[2, 2]);
+            assert!(tensor.device().is_cpu());
+            assert!(tensor.dtype().is_f32());
+            // Dropping `tensor` runs the versioned deleter and frees the context.
+        });
+    }
+
+    #[test]
+    fn test_roundtrip_unversioned_not_readonly() {
+        use crate::IntoDLPack;
+        Python::attach(|py| {
+            let t = RoundTripTensor {
+                data: vec![1.0, 2.0, 3.0, 4.0],
+                shape: vec![2, 2],
+            };
+            let capsule_obj = t.into_dlpack(py).unwrap();
+            let bound = capsule_obj.into_bound(py);
+            let capsule: Bound<'_, PyCapsule> = bound.cast_into().unwrap();
+
+            let tensor = PyTensor::from_capsule(&capsule).unwrap();
+            assert!(!tensor.is_read_only());
+            assert_eq!(tensor.shape(), &[2, 2]);
         });
     }
 }
