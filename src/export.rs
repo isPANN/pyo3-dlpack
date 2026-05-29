@@ -252,7 +252,7 @@ fn export_to_capsule<T: IntoDLPack>(
     }
 
     // Convert to PyObject
-    Ok(unsafe { Py::from_owned_ptr(py, capsule_ptr) })
+    Ok(unsafe { Bound::from_owned_ptr(py, capsule_ptr).unbind() })
 }
 
 /// Raw PyCapsule destructor - called by Python when garbage collecting the capsule.
