@@ -96,6 +96,28 @@ capsule = create_tensor()
 tensor = torch.from_dlpack(capsule)
 ```
 
+### Read-only and versioned DLPack
+
+`pyo3-dlpack` speaks both the legacy and the versioned (DLPack 1.0) protocol,
+and negotiation is automatic — you do not have to choose.
+
+- **Import** (`PyTensor::from_pyany`) advertises versioned support to the
+  producer and transparently accepts either a legacy `dltensor` capsule or a
+  versioned `dltensor_versioned` one. Call `tensor.is_read_only()` to check the
+  read-only flag (always `false` for legacy producers, which cannot express it).
+- **Export** keeps `into_dlpack` unchanged (a writable legacy capsule, for
+  maximum consumer compatibility). To export a read-only tensor, use
+  `into_dlpack_readonly`, which emits a versioned capsule with the read-only
+  flag set:
+
+```rust
+#[pyfunction]
+fn create_readonly_tensor(py: Python<'_>) -> PyResult<Py<PyAny>> {
+    let tensor = MyTensor { /* ... */ };
+    tensor.into_dlpack_readonly(py)
+}
+```
+
 ## Supported Data Types
 
 - Float: f16, f32, f64, bf16
