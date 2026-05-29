@@ -13,10 +13,10 @@ categories = ["development-tools::ffi", "science"]
 rust-version = "1.70"
 
 [dependencies]
-pyo3 = { version = "0.27", default-features = false }
+pyo3 = { version = "0.28", default-features = false }
 
 [dev-dependencies]
-pyo3 = { version = "0.27", features = ["auto-initialize"] }
+pyo3 = { version = "0.28", features = ["auto-initialize"] }
 criterion = "0.8"
 
 [features]
