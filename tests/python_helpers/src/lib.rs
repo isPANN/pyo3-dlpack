@@ -133,6 +133,17 @@ fn export_large_cpu_tensor(py: Python<'_>, size: usize) -> PyResult<Py<PyAny>> {
     tensor.into_dlpack(py)
 }
 
+/// Create a CPU tensor and export it as a **read-only** versioned DLPack capsule.
+/// The tensor data is [1.0, 2.0, 3.0, 4.0, 5.0, 6.0] with shape [2, 3].
+#[pyfunction]
+fn export_cpu_tensor_readonly(py: Python<'_>) -> PyResult<Py<PyAny>> {
+    let tensor = TrackedCpuTensor {
+        data: vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+        shape: vec![2, 3],
+    };
+    tensor.into_dlpack_readonly(py)
+}
+
 // ============================================================================
 // Import functions (Python DLPack capsule -> Rust)
 // ============================================================================
@@ -558,6 +569,13 @@ fn demo_gpu_tensors(py: Python<'_>) -> PyResult<()> {
     Ok(())
 }
 
+/// Import a tensor via DLPack and report whether it is read-only.
+#[pyfunction]
+fn import_is_readonly(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<bool> {
+    let tensor = PyTensor::from_pyany(py, obj)?;
+    Ok(tensor.is_read_only())
+}
+
 // ============================================================================
 // Python module definition
 // ============================================================================
@@ -573,10 +591,12 @@ fn dlpack_test_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(export_cpu_tensor, m)?)?;
     m.add_function(wrap_pyfunction!(export_gpu_tensor, m)?)?;
     m.add_function(wrap_pyfunction!(export_large_cpu_tensor, m)?)?;
+    m.add_function(wrap_pyfunction!(export_cpu_tensor_readonly, m)?)?;
 
     // Import functions (Python -> Rust)
     m.add_function(wrap_pyfunction!(import_tensor, m)?)?;
     m.add_function(wrap_pyfunction!(import_from_capsule, m)?)?;
+    m.add_function(wrap_pyfunction!(import_is_readonly, m)?)?;
     m.add_function(wrap_pyfunction!(try_double_import, m)?)?;
 
     // Capsule inspection

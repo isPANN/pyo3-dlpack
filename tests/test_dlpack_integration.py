@@ -346,6 +346,41 @@ class TestStress:
 
 
 # ============================================================================
+# Versioned DLPack (DLPack 1.0) / read-only tests
+# ============================================================================
+
+class TestVersionedCpu:
+    """Test versioned (DLPack 1.0) export/import on the CPU path."""
+
+    def test_readonly_export_is_versioned_capsule(self):
+        """A read-only export produces a 'dltensor_versioned' capsule."""
+        capsule = dtm.export_cpu_tensor_readonly()
+        assert dtm.get_capsule_name(capsule) == "dltensor_versioned"
+
+    @pytest.mark.skipif(not HAS_TORCH, reason="requires torch")
+    def test_readonly_capsule_consumed_by_torch(self):
+        """torch.from_dlpack consumes our versioned read-only capsule, zero-copy."""
+        capsule = dtm.export_cpu_tensor_readonly()
+        t = torch.from_dlpack(capsule)
+        assert list(t.shape) == [2, 3]
+        assert t.flatten().tolist() == [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+
+    def test_import_numpy_is_not_readonly(self):
+        """A normal numpy array imports as writable (not read-only)."""
+        arr = np.array([[1, 2, 3], [4, 5, 6]], dtype=np.float32)
+        assert dtm.import_is_readonly(arr) is False
+
+    @pytest.mark.skipif(not HAS_TORCH, reason="requires torch")
+    def test_import_torch_via_versioned_negotiation(self):
+        """A torch tensor still imports after max_version negotiation."""
+        t = torch.arange(6, dtype=torch.float32).reshape(2, 3)
+        info = dtm.import_tensor(t)
+        assert info["shape"] == [2, 3]
+        assert info["is_cpu"] is True
+        assert dtm.import_is_readonly(t) is False
+
+
+# ============================================================================
 # Run tests directly
 # ============================================================================
 
