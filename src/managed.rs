@@ -3,7 +3,10 @@
 //! This module provides `PyTensor`, a wrapper around a DLPack tensor
 //! received from Python that provides safe access to tensor metadata.
 
-use crate::ffi::{DLDataType, DLDevice, DLManagedTensor};
+use crate::ffi::{
+    DLDataType, DLDevice, DLManagedTensor, DLManagedTensorVersioned, DLTensor,
+    DLPACK_FLAG_BITMASK_READ_ONLY, DLPACK_MAJOR_VERSION, DLPACK_MINOR_VERSION,
+};
 use crate::DLPACK_CAPSULE_NAME;
 use pyo3::prelude::*;
 use pyo3::types::PyCapsule;
@@ -15,6 +18,17 @@ use std::ptr::NonNull;
 /// This must remain valid for the lifetime of the program since PyCapsule_SetName
 /// stores the pointer directly without copying.
 static USED_DLTENSOR_NAME: &[u8] = b"used_dltensor\0";
+
+/// Which managed-tensor layout backs a [`PyTensor`].
+///
+/// The embedded `DLTensor` lives at a different offset in the unversioned vs.
+/// versioned struct, and each has its own deleter signature, so we keep the
+/// typed owning pointer and branch where layout matters.
+#[derive(Clone, Copy)]
+enum ManagedPtr {
+    Unversioned(NonNull<DLManagedTensor>),
+    Versioned(NonNull<DLManagedTensorVersioned>),
+}
 
 /// A tensor imported from Python via the DLPack protocol.
 ///
@@ -51,7 +65,7 @@ static USED_DLTENSOR_NAME: &[u8] = b"used_dltensor\0";
 /// }
 /// ```
 pub struct PyTensor {
-    managed: NonNull<DLManagedTensor>,
+    managed: ManagedPtr,
     /// We store the capsule to prevent it from being garbage collected
     /// while we hold a reference to the managed tensor.
     #[allow(dead_code)]
@@ -63,6 +77,17 @@ pub struct PyTensor {
 unsafe impl Send for PyTensor {}
 
 impl PyTensor {
+    /// Borrow the embedded `DLTensor`, which lives at a different offset in the
+    /// unversioned vs. versioned managed struct.
+    fn dl_tensor(&self) -> &DLTensor {
+        unsafe {
+            match self.managed {
+                ManagedPtr::Unversioned(p) => &p.as_ref().dl_tensor,
+                ManagedPtr::Versioned(p) => &p.as_ref().dl_tensor,
+            }
+        }
+    }
+
     /// Create a PyTensor from a Python object that supports the DLPack protocol.
     ///
     /// This calls `__dlpack__()` on the object to get a DLPack capsule,
@@ -136,37 +161,35 @@ impl PyTensor {
         }
 
         Ok(Self {
-            managed,
+            managed: ManagedPtr::Unversioned(managed),
             capsule: capsule.clone().unbind(),
         })
     }
 
     /// Get the device where the tensor data resides.
     pub fn device(&self) -> DLDevice {
-        unsafe { self.managed.as_ref().dl_tensor.device }
+        self.dl_tensor().device
     }
 
     /// Get the data type of the tensor elements.
     pub fn dtype(&self) -> DLDataType {
-        unsafe { self.managed.as_ref().dl_tensor.dtype }
+        self.dl_tensor().dtype
     }
 
     /// Get the number of dimensions.
     pub fn ndim(&self) -> usize {
-        unsafe { self.managed.as_ref().dl_tensor.ndim as usize }
+        self.dl_tensor().ndim as usize
     }
 
     /// Get the shape as a slice.
     ///
     /// The length of the slice equals `ndim()`.
     pub fn shape(&self) -> &[i64] {
-        unsafe {
-            let tensor = &self.managed.as_ref().dl_tensor;
-            if tensor.shape.is_null() {
-                &[]
-            } else {
-                std::slice::from_raw_parts(tensor.shape, tensor.ndim as usize)
-            }
+        let tensor = self.dl_tensor();
+        if tensor.shape.is_null() {
+            &[]
+        } else {
+            unsafe { std::slice::from_raw_parts(tensor.shape, tensor.ndim as usize) }
         }
     }
 
@@ -175,16 +198,11 @@ impl PyTensor {
     /// Strides are in number of elements (not bytes).
     /// If `None`, the tensor is assumed to be in compact row-major order.
     pub fn strides(&self) -> Option<&[i64]> {
-        unsafe {
-            let tensor = &self.managed.as_ref().dl_tensor;
-            if tensor.strides.is_null() {
-                None
-            } else {
-                Some(std::slice::from_raw_parts(
-                    tensor.strides,
-                    tensor.ndim as usize,
-                ))
-            }
+        let tensor = self.dl_tensor();
+        if tensor.strides.is_null() {
+            None
+        } else {
+            Some(unsafe { std::slice::from_raw_parts(tensor.strides, tensor.ndim as usize) })
         }
     }
 
@@ -217,20 +235,18 @@ impl PyTensor {
     ///
     /// The pointer is adjusted by `byte_offset()`.
     pub fn data_ptr(&self) -> *mut c_void {
-        unsafe {
-            let tensor = &self.managed.as_ref().dl_tensor;
-            (tensor.data as *mut u8).add(tensor.byte_offset as usize) as *mut c_void
-        }
+        let tensor = self.dl_tensor();
+        unsafe { (tensor.data as *mut u8).add(tensor.byte_offset as usize) as *mut c_void }
     }
 
     /// Get the raw data pointer without byte offset adjustment.
     pub fn data_ptr_raw(&self) -> *mut c_void {
-        unsafe { self.managed.as_ref().dl_tensor.data }
+        self.dl_tensor().data
     }
 
     /// Get the byte offset from the raw data pointer.
     pub fn byte_offset(&self) -> u64 {
-        unsafe { self.managed.as_ref().dl_tensor.byte_offset }
+        self.dl_tensor().byte_offset
     }
 
     /// Get the total number of elements in the tensor.
@@ -251,11 +267,19 @@ impl PyTensor {
 
 impl Drop for PyTensor {
     fn drop(&mut self) {
-        // Call the deleter if present
+        // Call the deleter if present, at the correct struct offset for each layout.
         unsafe {
-            let managed = self.managed.as_ref();
-            if let Some(deleter) = managed.deleter {
-                deleter(self.managed.as_ptr());
+            match self.managed {
+                ManagedPtr::Unversioned(p) => {
+                    if let Some(deleter) = p.as_ref().deleter {
+                        deleter(p.as_ptr());
+                    }
+                }
+                ManagedPtr::Versioned(p) => {
+                    if let Some(deleter) = p.as_ref().deleter {
+                        deleter(p.as_ptr());
+                    }
+                }
             }
         }
     }
@@ -720,7 +744,7 @@ mod tests {
 
             // Manually construct PyTensor for testing
             let pytensor = PyTensor {
-                managed,
+                managed: ManagedPtr::Unversioned(managed),
                 capsule: capsule.clone().unbind(),
             };
 
@@ -767,7 +791,7 @@ mod tests {
             let managed = NonNull::new(managed_ptr).unwrap();
 
             let pytensor = PyTensor {
-                managed,
+                managed: ManagedPtr::Unversioned(managed),
                 capsule: capsule.clone().unbind(),
             };
 
@@ -798,7 +822,7 @@ mod tests {
             let managed = NonNull::new(managed_ptr).unwrap();
 
             let pytensor = PyTensor {
-                managed,
+                managed: ManagedPtr::Unversioned(managed),
                 capsule: capsule.clone().unbind(),
             };
 
@@ -826,7 +850,7 @@ mod tests {
             let managed = NonNull::new(managed_ptr).unwrap();
 
             let pytensor = PyTensor {
-                managed,
+                managed: ManagedPtr::Unversioned(managed),
                 capsule: capsule.clone().unbind(),
             };
 
@@ -856,7 +880,7 @@ mod tests {
             let managed = NonNull::new(managed_ptr).unwrap();
 
             let pytensor = PyTensor {
-                managed,
+                managed: ManagedPtr::Unversioned(managed),
                 capsule: capsule.clone().unbind(),
             };
 
@@ -886,7 +910,7 @@ mod tests {
             let managed = NonNull::new(managed_ptr).unwrap();
 
             let pytensor = PyTensor {
-                managed,
+                managed: ManagedPtr::Unversioned(managed),
                 capsule: capsule.clone().unbind(),
             };
 
@@ -915,7 +939,7 @@ mod tests {
             let managed = NonNull::new(managed_ptr).unwrap();
 
             let pytensor = PyTensor {
-                managed,
+                managed: ManagedPtr::Unversioned(managed),
                 capsule: capsule.clone().unbind(),
             };
 
@@ -944,7 +968,7 @@ mod tests {
             let managed = NonNull::new(managed_ptr).unwrap();
 
             let pytensor = PyTensor {
-                managed,
+                managed: ManagedPtr::Unversioned(managed),
                 capsule: capsule.clone().unbind(),
             };
 
@@ -976,7 +1000,7 @@ mod tests {
 
             {
                 let pytensor = PyTensor {
-                    managed,
+                    managed: ManagedPtr::Unversioned(managed),
                     capsule: capsule.clone().unbind(),
                 };
 
@@ -1009,7 +1033,7 @@ mod tests {
             let managed = NonNull::new(managed_ptr).unwrap();
 
             let pytensor = PyTensor {
-                managed,
+                managed: ManagedPtr::Unversioned(managed),
                 capsule: capsule.clone().unbind(),
             };
 
