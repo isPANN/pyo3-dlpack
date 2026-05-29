@@ -3,7 +3,10 @@
 //! This module provides the `IntoDLPack` trait for exporting Rust tensors
 //! to Python as DLPack capsules.
 
-use crate::ffi::{DLDataType, DLDevice, DLManagedTensor, DLTensor};
+use crate::ffi::{
+    DLDataType, DLDevice, DLManagedTensor, DLManagedTensorVersioned, DLPackVersion, DLTensor,
+    DLPACK_FLAG_BITMASK_READ_ONLY, DLPACK_MAJOR_VERSION, DLPACK_MINOR_VERSION,
+};
 use pyo3::prelude::*;
 use std::ffi::{c_void, CStr};
 
@@ -135,6 +138,16 @@ pub trait IntoDLPack: Send + Sized {
         let info = self.tensor_info();
         export_to_capsule(py, self, info)
     }
+
+    /// Export this tensor to Python as a **read-only** versioned DLPack capsule.
+    ///
+    /// Unlike [`into_dlpack`](IntoDLPack::into_dlpack), this emits a versioned
+    /// (`dltensor_versioned`) capsule with the read-only flag set, so consumers
+    /// that understand DLPack 1.0 know the data must not be modified.
+    fn into_dlpack_readonly(self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let info = self.tensor_info();
+        export_to_capsule_versioned(py, self, info, DLPACK_FLAG_BITMASK_READ_ONLY)
+    }
 }
 
 /// Internal context that owns the tensor during DLPack lifetime.
@@ -154,6 +167,12 @@ static DLPACK_CAPSULE_NAME: &[u8] = b"dltensor\0";
 /// The name for consumed DLPack capsules (per DLPack protocol)
 /// Using a static byte array with null terminator for C compatibility
 static USED_DLTENSOR_NAME: &[u8] = b"used_dltensor\0";
+
+/// The versioned DLPack capsule name (null-terminated for C compatibility)
+static DLPACK_VERSIONED_CAPSULE_NAME: &[u8] = b"dltensor_versioned\0";
+
+/// The name for consumed versioned DLPack capsules (per DLPack protocol)
+static USED_DLTENSOR_VERSIONED_NAME: &[u8] = b"used_dltensor_versioned\0";
 
 /// Build the owning context and the `DLTensor` descriptor shared by both the
 /// legacy and versioned export paths.
@@ -324,6 +343,100 @@ unsafe extern "C" fn dlpack_deleter<T>(managed_ptr: *mut DLManagedTensor) {
     if !managed.manager_ctx.is_null() {
         let _ctx = Box::from_raw(managed.manager_ctx as *mut ExportContext<T>);
         // ctx and its tensor are dropped here
+    }
+}
+
+/// Export a tensor to a versioned (`dltensor_versioned`) PyCapsule with the
+/// given flags.
+fn export_to_capsule_versioned<T: IntoDLPack>(
+    py: Python<'_>,
+    tensor: T,
+    info: TensorInfo,
+    flags: u64,
+) -> PyResult<Py<PyAny>> {
+    let (ctx_ptr, dl_tensor) = build_export_parts(tensor, info)?;
+
+    let managed = Box::new(DLManagedTensorVersioned {
+        version: DLPackVersion {
+            major: DLPACK_MAJOR_VERSION,
+            minor: DLPACK_MINOR_VERSION,
+        },
+        manager_ctx: ctx_ptr as *mut c_void,
+        deleter: Some(dlpack_deleter_versioned::<T>),
+        flags,
+        dl_tensor,
+    });
+    let managed_ptr = Box::into_raw(managed);
+
+    let capsule_ptr = unsafe {
+        pyo3::ffi::PyCapsule_New(
+            managed_ptr as *mut c_void,
+            DLPACK_VERSIONED_CAPSULE_NAME.as_ptr() as *const i8,
+            Some(raw_capsule_destructor_versioned),
+        )
+    };
+
+    if capsule_ptr.is_null() {
+        unsafe {
+            let _ = Box::from_raw(managed_ptr);
+            let _ = Box::from_raw(ctx_ptr);
+        }
+        return Err(pyo3::exceptions::PyMemoryError::new_err(
+            "Failed to create versioned DLPack capsule",
+        ));
+    }
+
+    unsafe {
+        pyo3::ffi::PyCapsule_SetContext(capsule_ptr, ctx_ptr as *mut c_void);
+    }
+
+    Ok(unsafe { Bound::from_owned_ptr(py, capsule_ptr).unbind() })
+}
+
+/// Raw PyCapsule destructor for versioned capsules.
+///
+/// Mirrors [`raw_capsule_destructor`] but checks the versioned capsule names
+/// and interprets the pointer as a `DLManagedTensorVersioned`.
+unsafe extern "C" fn raw_capsule_destructor_versioned(capsule_ptr: *mut pyo3::ffi::PyObject) {
+    if capsule_ptr.is_null() {
+        return;
+    }
+
+    let name_ptr = pyo3::ffi::PyCapsule_GetName(capsule_ptr);
+    if name_ptr.is_null() {
+        return;
+    }
+
+    let name = CStr::from_ptr(name_ptr);
+
+    // If consumed, the consumer owns it and will call the deleter. Don't double-free.
+    if name.to_bytes()
+        == USED_DLTENSOR_VERSIONED_NAME[..USED_DLTENSOR_VERSIONED_NAME.len() - 1].as_ref()
+    {
+        return;
+    }
+
+    let managed_ptr =
+        pyo3::ffi::PyCapsule_GetPointer(capsule_ptr, name_ptr) as *mut DLManagedTensorVersioned;
+    if managed_ptr.is_null() {
+        return;
+    }
+
+    let managed = &*managed_ptr;
+    if let Some(deleter) = managed.deleter {
+        deleter(managed_ptr);
+    }
+}
+
+/// Deleter for versioned managed tensors, called by the consumer when done.
+unsafe extern "C" fn dlpack_deleter_versioned<T>(managed_ptr: *mut DLManagedTensorVersioned) {
+    if managed_ptr.is_null() {
+        return;
+    }
+
+    let managed = Box::from_raw(managed_ptr);
+    if !managed.manager_ctx.is_null() {
+        let _ctx = Box::from_raw(managed.manager_ctx as *mut ExportContext<T>);
     }
 }
 
@@ -672,6 +785,28 @@ mod tests {
 
             let capsule = tensor.into_dlpack(py).expect("Failed to create capsule");
             assert!(!capsule.is_none(py));
+        });
+    }
+
+    #[test]
+    fn test_into_dlpack_readonly_is_versioned() {
+        Python::attach(|py| {
+            let tensor = TestTensor {
+                data: vec![1.0, 2.0, 3.0, 4.0],
+                shape: vec![2, 2],
+            };
+
+            let capsule = tensor
+                .into_dlpack_readonly(py)
+                .expect("Failed to create read-only capsule");
+
+            // A read-only export must produce a versioned capsule.
+            let name = unsafe {
+                let name_ptr = pyo3::ffi::PyCapsule_GetName(capsule.as_ptr());
+                assert!(!name_ptr.is_null());
+                CStr::from_ptr(name_ptr).to_owned()
+            };
+            assert_eq!(name.to_bytes(), b"dltensor_versioned");
         });
     }
 
