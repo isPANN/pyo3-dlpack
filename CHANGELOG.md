@@ -24,6 +24,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   not shipped with the published crate.
 
 ### Added
+- Versioned DLPack 1.0 support. Import (`PyTensor::from_pyany` / `from_capsule`)
+  now negotiates `max_version` and transparently accepts both `dltensor` and
+  `dltensor_versioned` capsules, with a new `PyTensor::is_read_only()` reader.
+  Export gains `IntoDLPack::into_dlpack_readonly` for emitting a read-only
+  versioned capsule; `into_dlpack` is unchanged (legacy, writable). New FFI
+  types `DLManagedTensorVersioned` / `DLPackVersion`, flag-bitmask constants,
+  and versioned capsule-name constants are re-exported.
 - `CHANGELOG.md` following the Keep a Changelog format.
 - CI: MSRV job (Rust 1.83) verifying the crate builds on the declared
   `rust-version`.
