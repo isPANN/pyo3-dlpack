@@ -310,6 +310,56 @@ pub struct DLManagedTensor {
     pub deleter: Option<DLManagedTensorDeleter>,
 }
 
+/// DLPack protocol version, as carried by `DLManagedTensorVersioned`.
+///
+/// Corresponds to `DLPackVersion` in the DLPack specification.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DLPackVersion {
+    /// Major version. Incremented on ABI-breaking changes.
+    pub major: u32,
+    /// Minor version. Incremented on backward-compatible additions.
+    pub minor: u32,
+}
+
+/// The DLPack major version this crate produces and accepts.
+pub const DLPACK_MAJOR_VERSION: u32 = 1;
+/// The DLPack minor version this crate produces.
+pub const DLPACK_MINOR_VERSION: u32 = 1;
+
+/// Flag bitmask: the tensor data is read-only.
+pub const DLPACK_FLAG_BITMASK_READ_ONLY: u64 = 1 << 0;
+/// Flag bitmask: the tensor data was copied by the producer.
+pub const DLPACK_FLAG_BITMASK_IS_COPIED: u64 = 1 << 1;
+/// Flag bitmask: a sub-byte-typed tensor is padded to a byte boundary.
+pub const DLPACK_FLAG_BITMASK_IS_SUBBYTE_TYPE_PADDED: u64 = 1 << 2;
+
+/// Deleter function signature for `DLManagedTensorVersioned`.
+///
+/// Note this takes a pointer to the *versioned* struct, which has a different
+/// layout from `DLManagedTensor`, so it is a distinct type from
+/// [`DLManagedTensorDeleter`].
+pub type DLManagedTensorVersionedDeleter = unsafe extern "C" fn(*mut DLManagedTensorVersioned);
+
+/// A versioned managed tensor (DLPack 1.0).
+///
+/// Corresponds to `DLManagedTensorVersioned` in the DLPack specification.
+/// The field order differs from [`DLManagedTensor`]: `version` is first and
+/// `dl_tensor` is last. This is an ABI contract — do not reorder.
+#[repr(C)]
+pub struct DLManagedTensorVersioned {
+    /// Protocol version of this struct.
+    pub version: DLPackVersion,
+    /// Opaque manager context for the producer's use.
+    pub manager_ctx: *mut c_void,
+    /// Deleter function called when the consumer is done. Can be null.
+    pub deleter: Option<DLManagedTensorVersionedDeleter>,
+    /// Bitmask of `DLPACK_FLAG_BITMASK_*` flags.
+    pub flags: u64,
+    /// The underlying tensor descriptor.
+    pub dl_tensor: DLTensor,
+}
+
 // ============================================================================
 // Convenience constructors
 // ============================================================================
@@ -863,6 +913,38 @@ mod tests {
         let size = std::mem::size_of::<DLManagedTensor>();
         assert!(size > 0);
         // DLManagedTensor = DLTensor + manager_ctx(8) + deleter(8 or 16 for Option<fn>)
+    }
+
+    #[test]
+    fn test_dl_pack_version_layout() {
+        // DLPackVersion is two u32 fields, no padding.
+        assert_eq!(std::mem::size_of::<DLPackVersion>(), 8);
+        assert_eq!(std::mem::offset_of!(DLPackVersion, major), 0);
+        assert_eq!(std::mem::offset_of!(DLPackVersion, minor), 4);
+    }
+
+    #[test]
+    fn test_dl_managed_tensor_versioned_layout() {
+        // DLPack 1.0 field order: version, manager_ctx, deleter, flags, dl_tensor.
+        // version must be first; dl_tensor must be last (after flags).
+        assert_eq!(std::mem::offset_of!(DLManagedTensorVersioned, version), 0);
+        assert!(
+            std::mem::offset_of!(DLManagedTensorVersioned, manager_ctx)
+                >= std::mem::size_of::<DLPackVersion>()
+        );
+        assert!(
+            std::mem::offset_of!(DLManagedTensorVersioned, dl_tensor)
+                > std::mem::offset_of!(DLManagedTensorVersioned, flags)
+        );
+        // The versioned struct embeds a full DLTensor plus header fields.
+        assert!(std::mem::size_of::<DLManagedTensorVersioned>() > std::mem::size_of::<DLTensor>());
+    }
+
+    #[test]
+    fn test_read_only_flag_value() {
+        assert_eq!(DLPACK_FLAG_BITMASK_READ_ONLY, 1);
+        assert_eq!(DLPACK_FLAG_BITMASK_IS_COPIED, 2);
+        assert_eq!(DLPACK_MAJOR_VERSION, 1);
     }
 
     #[test]

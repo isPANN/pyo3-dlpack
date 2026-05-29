@@ -61,7 +61,12 @@ mod managed;
 
 // Re-export public API
 pub use export::{IntoDLPack, TensorInfo};
-pub use ffi::{DLDataType, DLDataTypeCode, DLDevice, DLDeviceType, DLManagedTensor, DLTensor};
+pub use ffi::{
+    DLDataType, DLDataTypeCode, DLDevice, DLDeviceType, DLManagedTensor, DLManagedTensorVersioned,
+    DLPackVersion, DLTensor, DLPACK_FLAG_BITMASK_IS_COPIED,
+    DLPACK_FLAG_BITMASK_IS_SUBBYTE_TYPE_PADDED, DLPACK_FLAG_BITMASK_READ_ONLY,
+    DLPACK_MAJOR_VERSION, DLPACK_MINOR_VERSION,
+};
 pub use managed::PyTensor;
 
 // Convenience constructors
@@ -75,3 +80,9 @@ pub const DLPACK_CAPSULE_NAME: &std::ffi::CStr = c"dltensor";
 
 /// The DLPack capsule name after consumption (to prevent double-free)
 pub const DLPACK_CAPSULE_NAME_USED: &std::ffi::CStr = c"used_dltensor";
+
+/// The DLPack capsule name for versioned (DLPack 1.0) tensor exchange.
+pub const DLPACK_VERSIONED_CAPSULE_NAME: &std::ffi::CStr = c"dltensor_versioned";
+
+/// The versioned DLPack capsule name after consumption (to prevent double-free).
+pub const DLPACK_VERSIONED_CAPSULE_NAME_USED: &std::ffi::CStr = c"used_dltensor_versioned";
