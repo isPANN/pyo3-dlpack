@@ -9,7 +9,7 @@
 //! ## Features
 //!
 //! - **Zero-copy**: Tensors are shared directly without copying data
-//! - **PyO3 0.23+**: Uses the modern `IntoPyObject` trait (no deprecation warnings)
+//! - **PyO3 0.28+**: Uses the modern `IntoPyObject` trait (no deprecation warnings)
 //! - **Bidirectional**: Import tensors from Python and export tensors to Python
 //! - **Device-agnostic**: Works with CPU, CUDA, ROCm, and other devices
 //!

@@ -261,7 +261,7 @@ impl DLDataType {
 
     /// Get the size of one element in bytes.
     pub fn itemsize(&self) -> usize {
-        ((self.bits as usize) * (self.lanes as usize) + 7) / 8
+        ((self.bits as usize) * (self.lanes as usize)).div_ceil(8)
     }
 }
 

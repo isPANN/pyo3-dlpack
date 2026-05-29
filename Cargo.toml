@@ -1,6 +1,6 @@
 [package]
 name = "pyo3-dlpack"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 authors = ["isPANN"]
 description = "Zero-copy DLPack tensor interop for PyO3"
@@ -10,7 +10,7 @@ documentation = "https://docs.rs/pyo3-dlpack"
 readme = "README.md"
 keywords = ["dlpack", "pyo3", "tensor", "pytorch", "numpy"]
 categories = ["development-tools::ffi", "science"]
-rust-version = "1.70"
+rust-version = "1.83"
 
 [dependencies]
 pyo3 = { version = "0.28", default-features = false }

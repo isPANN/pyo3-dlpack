@@ -9,7 +9,7 @@ the [DLPack](https://github.com/dmlc/dlpack) protocol.
 ## Features
 
 - **Zero-copy**: Tensors are shared directly without copying data
-- **PyO3 0.27+**: Uses the modern API (no deprecation warnings)
+- **PyO3 0.28+**: Uses the modern API (no deprecation warnings)
 - **Bidirectional**: Import tensors from Python and export tensors to Python
 - **Device-agnostic**: Works with CPU, CUDA, ROCm, and other devices
 
@@ -19,8 +19,8 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-pyo3-dlpack = "0.1"
-pyo3 = "0.27"
+pyo3-dlpack = "0.2"
+pyo3 = "0.28"
 ```
 
 ## Usage
