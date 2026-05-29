@@ -324,7 +324,9 @@ pub struct DLPackVersion {
 
 /// The DLPack major version this crate produces and accepts.
 pub const DLPACK_MAJOR_VERSION: u32 = 1;
-/// The DLPack minor version this crate produces.
+/// The DLPack minor version this crate produces. Intentionally conservative:
+/// we implement the 1.0 struct layout and the read-only flag only. Minor
+/// versions are backward-compatible, so consumers/producers negotiate safely.
 pub const DLPACK_MINOR_VERSION: u32 = 1;
 
 /// Flag bitmask: the tensor data is read-only.
@@ -352,7 +354,8 @@ pub struct DLManagedTensorVersioned {
     pub version: DLPackVersion,
     /// Opaque manager context for the producer's use.
     pub manager_ctx: *mut c_void,
-    /// Deleter function called when the consumer is done. Can be null.
+    /// Deleter function called when the consumer is done. Can be null if no
+    /// cleanup is needed.
     pub deleter: Option<DLManagedTensorVersionedDeleter>,
     /// Bitmask of `DLPACK_FLAG_BITMASK_*` flags.
     pub flags: u64,
@@ -926,15 +929,25 @@ mod tests {
     #[test]
     fn test_dl_managed_tensor_versioned_layout() {
         // DLPack 1.0 field order: version, manager_ctx, deleter, flags, dl_tensor.
-        // version must be first; dl_tensor must be last (after flags).
-        assert_eq!(std::mem::offset_of!(DLManagedTensorVersioned, version), 0);
+        // Assert the full strict ordering (portable across pointer widths) so any
+        // accidental field reordering is caught, not just version-first / tensor-last.
+        use std::mem::offset_of;
+        assert_eq!(offset_of!(DLManagedTensorVersioned, version), 0);
         assert!(
-            std::mem::offset_of!(DLManagedTensorVersioned, manager_ctx)
-                >= std::mem::size_of::<DLPackVersion>()
+            offset_of!(DLManagedTensorVersioned, version)
+                < offset_of!(DLManagedTensorVersioned, manager_ctx)
         );
         assert!(
-            std::mem::offset_of!(DLManagedTensorVersioned, dl_tensor)
-                > std::mem::offset_of!(DLManagedTensorVersioned, flags)
+            offset_of!(DLManagedTensorVersioned, manager_ctx)
+                < offset_of!(DLManagedTensorVersioned, deleter)
+        );
+        assert!(
+            offset_of!(DLManagedTensorVersioned, deleter)
+                < offset_of!(DLManagedTensorVersioned, flags)
+        );
+        assert!(
+            offset_of!(DLManagedTensorVersioned, flags)
+                < offset_of!(DLManagedTensorVersioned, dl_tensor)
         );
         // The versioned struct embeds a full DLTensor plus header fields.
         assert!(std::mem::size_of::<DLManagedTensorVersioned>() > std::mem::size_of::<DLTensor>());
@@ -944,6 +957,7 @@ mod tests {
     fn test_read_only_flag_value() {
         assert_eq!(DLPACK_FLAG_BITMASK_READ_ONLY, 1);
         assert_eq!(DLPACK_FLAG_BITMASK_IS_COPIED, 2);
+        assert_eq!(DLPACK_FLAG_BITMASK_IS_SUBBYTE_TYPE_PADDED, 4);
         assert_eq!(DLPACK_MAJOR_VERSION, 1);
     }
 
