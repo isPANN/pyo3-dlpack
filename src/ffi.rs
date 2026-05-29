@@ -324,10 +324,15 @@ pub struct DLPackVersion {
 
 /// The DLPack major version this crate produces and accepts.
 pub const DLPACK_MAJOR_VERSION: u32 = 1;
-/// The DLPack minor version this crate produces. Intentionally conservative:
-/// we implement the 1.0 struct layout and the read-only flag only. Minor
-/// versions are backward-compatible, so consumers/producers negotiate safely.
-pub const DLPACK_MINOR_VERSION: u32 = 1;
+/// The DLPack minor version this crate produces and advertises.
+///
+/// Set to 0 because this crate implements the DLPack **1.0** feature set: the
+/// versioned struct layout (`DLManagedTensorVersioned`), the read-only flag,
+/// and the `max_version` negotiation kwarg. The Python array-API negotiation
+/// example itself uses `max_version=(1, 0)`. Minor versions are
+/// backward-compatible, so advertising `0` is the honest floor and is accepted
+/// by all conforming 1.x consumers.
+pub const DLPACK_MINOR_VERSION: u32 = 0;
 
 /// Flag bitmask: the tensor data is read-only.
 pub const DLPACK_FLAG_BITMASK_READ_ONLY: u64 = 1 << 0;

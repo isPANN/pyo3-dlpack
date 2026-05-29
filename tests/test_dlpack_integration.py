@@ -379,6 +379,21 @@ class TestVersionedCpu:
         assert info["is_cpu"] is True
         assert dtm.import_is_readonly(t) is False
 
+    def test_capsule_data_ptr_versioned(self):
+        """capsule_data_ptr returns a real heap pointer for a versioned capsule, not the version header."""
+        capsule = dtm.export_cpu_tensor_readonly()
+        ptr = dtm.capsule_data_ptr(capsule)
+        # The buggy path would read the DLPackVersion header (~0 or 1) as the data pointer.
+        assert ptr > 0xFFFF
+
+    def test_is_capsule_consumed_versioned(self):
+        """is_capsule_consumed recognizes a consumed versioned capsule."""
+        cap = dtm.export_cpu_tensor_readonly()
+        assert dtm.is_capsule_consumed(cap) is False
+        # Consume it via import_from_capsule; this renames it to used_dltensor_versioned.
+        dtm.import_from_capsule(cap)
+        assert dtm.is_capsule_consumed(cap) is True
+
 
 # ============================================================================
 # Run tests directly

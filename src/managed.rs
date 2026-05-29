@@ -7,20 +7,14 @@ use crate::ffi::{
     DLDataType, DLDevice, DLManagedTensor, DLManagedTensorVersioned, DLTensor,
     DLPACK_FLAG_BITMASK_READ_ONLY, DLPACK_MAJOR_VERSION, DLPACK_MINOR_VERSION,
 };
-use crate::{DLPACK_CAPSULE_NAME, DLPACK_VERSIONED_CAPSULE_NAME};
+use crate::{
+    DLPACK_CAPSULE_NAME, DLPACK_CAPSULE_NAME_USED, DLPACK_VERSIONED_CAPSULE_NAME,
+    DLPACK_VERSIONED_CAPSULE_NAME_USED,
+};
 use pyo3::prelude::*;
 use pyo3::types::PyCapsule;
-use std::ffi::{c_char, c_void, CStr};
+use std::ffi::{c_void, CStr};
 use std::ptr::NonNull;
-
-/// The name for consumed DLPack capsules (per DLPack protocol).
-/// Using a static byte array with null terminator for C compatibility.
-/// This must remain valid for the lifetime of the program since PyCapsule_SetName
-/// stores the pointer directly without copying.
-static USED_DLTENSOR_NAME: &[u8] = b"used_dltensor\0";
-
-/// The name for consumed versioned DLPack capsules (per DLPack protocol).
-static USED_DLTENSOR_VERSIONED_NAME: &[u8] = b"used_dltensor_versioned\0";
 
 /// Which managed-tensor layout backs a [`PyTensor`].
 ///
@@ -114,7 +108,10 @@ impl PyTensor {
         // __dlpack__ predates the kwarg raise TypeError; fall back to a no-arg
         // call for them. The actual capsule kind is decided later by name.
         let kwargs = pyo3::types::PyDict::new(py);
-        kwargs.set_item("max_version", (DLPACK_MAJOR_VERSION, DLPACK_MINOR_VERSION))?;
+        kwargs.set_item(
+            pyo3::intern!(py, "max_version"),
+            (DLPACK_MAJOR_VERSION, DLPACK_MINOR_VERSION),
+        )?;
 
         let capsule_obj = match obj.call_method("__dlpack__", (), Some(&kwargs)) {
             Ok(c) => c,
@@ -177,10 +174,7 @@ impl PyTensor {
         // Per DLPack protocol, rename to "used_dltensor" to take ownership and
         // prevent double-consume / double-free.
         let set_name_result = unsafe {
-            pyo3::ffi::PyCapsule_SetName(
-                capsule.as_ptr(),
-                USED_DLTENSOR_NAME.as_ptr() as *const c_char,
-            )
+            pyo3::ffi::PyCapsule_SetName(capsule.as_ptr(), DLPACK_CAPSULE_NAME_USED.as_ptr())
         };
         if set_name_result != 0 {
             return Err(pyo3::exceptions::PyRuntimeError::new_err(
@@ -215,7 +209,7 @@ impl PyTensor {
         let set_name_result = unsafe {
             pyo3::ffi::PyCapsule_SetName(
                 capsule.as_ptr(),
-                USED_DLTENSOR_VERSIONED_NAME.as_ptr() as *const c_char,
+                DLPACK_VERSIONED_CAPSULE_NAME_USED.as_ptr(),
             )
         };
         if set_name_result != 0 {

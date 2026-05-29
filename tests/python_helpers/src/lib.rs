@@ -5,7 +5,7 @@
 
 use pyo3::prelude::*;
 use pyo3::types::PyCapsule;
-use pyo3_dlpack::{cpu_device, cuda_device, dtype_f32, DLDeviceType, DLManagedTensor, IntoDLPack, PyTensor, TensorInfo};
+use pyo3_dlpack::{cpu_device, cuda_device, dtype_f32, DLDeviceType, DLManagedTensor, DLManagedTensorVersioned, IntoDLPack, PyTensor, TensorInfo};
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -209,7 +209,8 @@ fn try_double_import(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<(bool, 
 // Capsule state inspection (for debugging)
 // ============================================================================
 
-/// Check if a capsule has been consumed (name changed to "used_dltensor").
+/// Check if a capsule has been consumed (name changed to "used_dltensor" or
+/// "used_dltensor_versioned").
 #[pyfunction]
 fn is_capsule_consumed(capsule: &Bound<'_, PyCapsule>) -> PyResult<bool> {
     let name = capsule.name()?;
@@ -217,7 +218,8 @@ fn is_capsule_consumed(capsule: &Bound<'_, PyCapsule>) -> PyResult<bool> {
         Some(n) => {
             // Safety: We use the CStr immediately and don't store it
             let cstr = unsafe { n.as_cstr() };
-            Ok(cstr.to_bytes() == b"used_dltensor")
+            let bytes = cstr.to_bytes();
+            Ok(bytes == b"used_dltensor" || bytes == b"used_dltensor_versioned")
         }
         None => Ok(false),
     }
@@ -242,6 +244,10 @@ fn get_capsule_name(capsule: &Bound<'_, PyCapsule>) -> PyResult<Option<String>> 
 // ============================================================================
 
 /// Get the data pointer (including byte_offset) from a DLPack capsule.
+///
+/// Dispatches on the capsule name so that versioned (`dltensor_versioned`)
+/// capsules are cast to `DLManagedTensorVersioned` — avoiding a misread of the
+/// `DLPackVersion` header as a data pointer.
 #[pyfunction]
 fn capsule_data_ptr(capsule: &Bound<'_, PyCapsule>) -> PyResult<usize> {
     unsafe {
@@ -253,16 +259,21 @@ fn capsule_data_ptr(capsule: &Bound<'_, PyCapsule>) -> PyResult<usize> {
             ));
         }
 
-        let managed_ptr = pyo3::ffi::PyCapsule_GetPointer(capsule_ptr, name_ptr)
-            as *mut DLManagedTensor;
-        if managed_ptr.is_null() {
+        let raw_ptr = pyo3::ffi::PyCapsule_GetPointer(capsule_ptr, name_ptr);
+        if raw_ptr.is_null() {
             return Err(pyo3::exceptions::PyValueError::new_err(
-                "Capsule does not contain DLManagedTensor",
+                "Capsule does not contain a DLPack managed tensor",
             ));
         }
 
-        let managed = &*managed_ptr;
-        Ok(managed.dl_tensor.data as usize + managed.dl_tensor.byte_offset as usize)
+        let name = std::ffi::CStr::from_ptr(name_ptr);
+        if name.to_bytes() == b"dltensor_versioned" {
+            let managed = &*(raw_ptr as *mut DLManagedTensorVersioned);
+            Ok(managed.dl_tensor.data as usize + managed.dl_tensor.byte_offset as usize)
+        } else {
+            let managed = &*(raw_ptr as *mut DLManagedTensor);
+            Ok(managed.dl_tensor.data as usize + managed.dl_tensor.byte_offset as usize)
+        }
     }
 }
 

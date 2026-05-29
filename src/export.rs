@@ -7,6 +7,10 @@ use crate::ffi::{
     DLDataType, DLDevice, DLManagedTensor, DLManagedTensorVersioned, DLPackVersion, DLTensor,
     DLPACK_FLAG_BITMASK_READ_ONLY, DLPACK_MAJOR_VERSION, DLPACK_MINOR_VERSION,
 };
+use crate::{
+    DLPACK_CAPSULE_NAME, DLPACK_CAPSULE_NAME_USED, DLPACK_VERSIONED_CAPSULE_NAME,
+    DLPACK_VERSIONED_CAPSULE_NAME_USED,
+};
 use pyo3::prelude::*;
 use std::ffi::{c_void, CStr};
 
@@ -161,19 +165,6 @@ struct ExportContext<T> {
     strides: Option<Vec<i64>>,
 }
 
-/// The DLPack capsule name (null-terminated for C compatibility)
-static DLPACK_CAPSULE_NAME: &[u8] = b"dltensor\0";
-
-/// The name for consumed DLPack capsules (per DLPack protocol)
-/// Using a static byte array with null terminator for C compatibility
-static USED_DLTENSOR_NAME: &[u8] = b"used_dltensor\0";
-
-/// The versioned DLPack capsule name (null-terminated for C compatibility)
-static DLPACK_VERSIONED_CAPSULE_NAME: &[u8] = b"dltensor_versioned\0";
-
-/// The name for consumed versioned DLPack capsules (per DLPack protocol)
-static USED_DLTENSOR_VERSIONED_NAME: &[u8] = b"used_dltensor_versioned\0";
-
 /// Build the owning context and the `DLTensor` descriptor shared by both the
 /// legacy and versioned export paths.
 ///
@@ -255,11 +246,11 @@ fn export_to_capsule<T: IntoDLPack>(
 
     // Create the PyCapsule using low-level FFI to ensure the pointer is stored directly.
     // DLPack consumers expect PyCapsule_GetPointer to return a DLManagedTensor* directly.
-    // Use static name so it remains valid for the capsule's lifetime.
+    // Use the crate-level CStr constant so the name is defined exactly once.
     let capsule_ptr = unsafe {
         pyo3::ffi::PyCapsule_New(
             managed_ptr as *mut c_void,
-            DLPACK_CAPSULE_NAME.as_ptr() as *const i8,
+            DLPACK_CAPSULE_NAME.as_ptr(),
             Some(raw_capsule_destructor),
         )
     };
@@ -273,12 +264,6 @@ fn export_to_capsule<T: IntoDLPack>(
         return Err(pyo3::exceptions::PyMemoryError::new_err(
             "Failed to create DLPack capsule",
         ));
-    }
-
-    // Store a reference to ctx_ptr in the capsule context so the destructor
-    // can check if the capsule was consumed and clean up properly.
-    unsafe {
-        pyo3::ffi::PyCapsule_SetContext(capsule_ptr, ctx_ptr as *mut c_void);
     }
 
     Ok(unsafe { Bound::from_owned_ptr(py, capsule_ptr).unbind() })
@@ -309,7 +294,7 @@ unsafe extern "C" fn raw_capsule_destructor(capsule_ptr: *mut pyo3::ffi::PyObjec
 
     // If name is "used_dltensor", the consumer has taken ownership
     // and will call the deleter when done. Don't double-free.
-    if name.to_bytes() == USED_DLTENSOR_NAME[..USED_DLTENSOR_NAME.len() - 1].as_ref() {
+    if name.to_bytes() == DLPACK_CAPSULE_NAME_USED.to_bytes() {
         return;
     }
 
@@ -371,7 +356,7 @@ fn export_to_capsule_versioned<T: IntoDLPack>(
     let capsule_ptr = unsafe {
         pyo3::ffi::PyCapsule_New(
             managed_ptr as *mut c_void,
-            DLPACK_VERSIONED_CAPSULE_NAME.as_ptr() as *const i8,
+            DLPACK_VERSIONED_CAPSULE_NAME.as_ptr(),
             Some(raw_capsule_destructor_versioned),
         )
     };
@@ -384,10 +369,6 @@ fn export_to_capsule_versioned<T: IntoDLPack>(
         return Err(pyo3::exceptions::PyMemoryError::new_err(
             "Failed to create versioned DLPack capsule",
         ));
-    }
-
-    unsafe {
-        pyo3::ffi::PyCapsule_SetContext(capsule_ptr, ctx_ptr as *mut c_void);
     }
 
     Ok(unsafe { Bound::from_owned_ptr(py, capsule_ptr).unbind() })
@@ -410,9 +391,7 @@ unsafe extern "C" fn raw_capsule_destructor_versioned(capsule_ptr: *mut pyo3::ff
     let name = CStr::from_ptr(name_ptr);
 
     // If consumed, the consumer owns it and will call the deleter. Don't double-free.
-    if name.to_bytes()
-        == USED_DLTENSOR_VERSIONED_NAME[..USED_DLTENSOR_VERSIONED_NAME.len() - 1].as_ref()
-    {
+    if name.to_bytes() == DLPACK_VERSIONED_CAPSULE_NAME_USED.to_bytes() {
         return;
     }
 
