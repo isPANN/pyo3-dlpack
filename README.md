@@ -145,29 +145,31 @@ fn create_readonly_tensor(py: Python<'_>) -> PyResult<Py<PyAny>> {
 
 ## Performance
 
-DLPack enables true zero-copy tensor sharing. Benchmark results on Apple M3:
+DLPack enables true zero-copy tensor sharing: only metadata is processed, never the
+data, so cost is constant regardless of tensor size. Copy-based interop is O(n) in
+both time and peak memory. Representative results on Apple M3 (see
+[BENCHMARKS.md](BENCHMARKS.md) for the full methodology, the `dlpark` head-to-head,
+and reproduce commands):
 
-| Operation | Time | vs Copy |
-|-----------|------|---------|
-| DLPack capsule export (1M f32) | **8.3 µs** | 7.3x faster |
-| DLPack capsule import (1M f32) | **7.9 µs** | 7.7x faster |
-| Vec clone baseline (1M f32) | 60.9 µs | - |
+| Operation (1M f32) | pyo3-dlpack (zero-copy) | Copy baseline |
+|--------------------|-------------------------|---------------|
+| Export Rust → Python | **~3.2 µs** | ~99 µs (`Vec::clone` / `rust-numpy`) |
+| Import Python → Rust | **~2.5 µs** | — |
 
-The DLPack overhead is constant regardless of tensor size - only metadata is processed,
-not the actual data. This makes it ideal for large tensors where copying would be expensive.
+The gap widens with size. Importing zero-copy from Python stays **flat at ~0.5 µs**
+from 1M to 100M elements, while `numpy.copy()` grows to **~28 ms** at 100M — roughly
+**54,000× faster** — and a zero-copy import adds **0 MiB** of resident memory where a
+copy adds the full buffer (≈191 MiB for a 191 MiB array).
 
-```
-# Rust criterion benchmarks (cargo bench)
-export_capsule_1k       time:   [155.44 ns 159.74 ns 166.84 ns]
-export_capsule_1m       time:   [7.71 µs 8.26 µs 8.89 µs]
-import_capsule_1m       time:   [7.44 µs 7.89 µs 8.41 µs]
-vec_clone_1m            time:   [60.45 µs 60.90 µs 61.38 µs]
-```
+Against [`dlpark`](https://github.com/SunDoge/dlpark) (the mature Rust DLPack crate),
+raw throughput is at **parity** — both are zero-copy capsule wrappers. See
+[BENCHMARKS.md](BENCHMARKS.md) for the per-size head-to-head.
 
-Run benchmarks yourself:
-- `make bench-rust` - Rust criterion benchmarks
-- `make bench-python` - Python benchmarks
-- `make bench` - All benchmarks
+Run the benchmarks yourself (`cargo bench` needs Rust ≥ 1.85 for the `dlpark`
+dev-dependency):
+- `make bench-rust` — Rust criterion head-to-head (`cargo bench --bench dlpack`)
+- `make bench-python` — Python benchmarks; also `python benchmarks/bench_dlpack.py --compare` and `--memory`, and `python benchmarks/interop_probe.py`
+- `make bench` — all benchmarks
 
 ## Testing
 

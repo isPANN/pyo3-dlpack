@@ -18,6 +18,10 @@ pyo3 = { version = "0.28", default-features = false }
 [dev-dependencies]
 pyo3 = { version = "0.28", features = ["auto-initialize"] }
 criterion = "0.8"
+# Competitor crates used only by the comparison benchmarks (`cargo bench`) and
+# `tests/competitor_smoke.rs`. `dlpark` is edition 2024, so running the benchmarks
+# needs Rust >= 1.85. This does NOT affect the library's MSRV (`rust-version` above):
+# dev-dependencies are never pulled in by consumers of pyo3-dlpack.
 dlpark = { version = "0.7", features = ["pyo3"] }
 numpy = "0.28"
 
