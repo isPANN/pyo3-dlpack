@@ -48,7 +48,10 @@ fn bench_export_pyo3_dlpack(c: &mut Criterion) {
     for &size in SIZES {
         group.bench_with_input(BenchmarkId::from_parameter(size), &size, |b, &size| {
             b.iter_batched(
-                || TestTensor { data: make_vec(size), shape: vec![size as i64] },
+                || TestTensor {
+                    data: make_vec(size),
+                    shape: vec![size as i64],
+                },
                 |tensor| {
                     Python::attach(|py| {
                         drop(black_box(tensor.into_dlpack(py).unwrap()));
@@ -71,7 +74,10 @@ fn bench_export_dlpark_legacy(c: &mut Criterion) {
                 || make_vec(size),
                 |v| {
                     Python::attach(|py| {
-                        let cap = SafeManagedTensor::new(v).unwrap().into_pyobject(py).unwrap();
+                        let cap = SafeManagedTensor::new(v)
+                            .unwrap()
+                            .into_pyobject(py)
+                            .unwrap();
                         drop(black_box(cap));
                     });
                 },
@@ -92,7 +98,10 @@ fn bench_export_dlpark_versioned(c: &mut Criterion) {
                 || make_vec(size),
                 |v| {
                     Python::attach(|py| {
-                        let cap = SafeManagedTensorVersioned::new(v).unwrap().into_pyobject(py).unwrap();
+                        let cap = SafeManagedTensorVersioned::new(v)
+                            .unwrap()
+                            .into_pyobject(py)
+                            .unwrap();
                         drop(black_box(cap));
                     });
                 },
@@ -152,7 +161,10 @@ fn bench_import_pyo3_dlpack(c: &mut Criterion) {
             b.iter_batched(
                 || {
                     Python::attach(|py| {
-                        let t = TestTensor { data: make_vec(size), shape: vec![size as i64] };
+                        let t = TestTensor {
+                            data: make_vec(size),
+                            shape: vec![size as i64],
+                        };
                         t.into_dlpack(py).unwrap()
                     })
                 },

@@ -10,7 +10,10 @@ fn dlpark_legacy_roundtrips_a_vec() {
     Python::attach(|py| {
         let v = vec![1.0f32, 2.0, 3.0];
         let src_ptr = v.as_ptr() as usize;
-        let capsule = SafeManagedTensor::new(v).unwrap().into_pyobject(py).unwrap();
+        let capsule = SafeManagedTensor::new(v)
+            .unwrap()
+            .into_pyobject(py)
+            .unwrap();
         let back = SafeManagedTensor::extract((&capsule).into()).unwrap();
         let slice: &[f32] = back.as_slice_contiguous().unwrap();
         assert_eq!(slice, &[1.0, 2.0, 3.0]);
@@ -25,10 +28,16 @@ fn dlpark_versioned_roundtrips_a_vec() {
     Python::attach(|py| {
         let v = vec![4.0f32, 5.0, 6.0];
         let src_ptr = v.as_ptr() as usize;
-        let capsule = SafeManagedTensorVersioned::new(v).unwrap().into_pyobject(py).unwrap();
+        let capsule = SafeManagedTensorVersioned::new(v)
+            .unwrap()
+            .into_pyobject(py)
+            .unwrap();
         let cap = capsule.cast::<PyCapsule>().unwrap();
         // SAFETY: dlpark's capsule names are statically allocated string literals.
-        assert_eq!(unsafe { cap.name().unwrap().unwrap().as_cstr() }.to_bytes(), b"dltensor_versioned");
+        assert_eq!(
+            unsafe { cap.name().unwrap().unwrap().as_cstr() }.to_bytes(),
+            b"dltensor_versioned"
+        );
         // cast to PyAny: extract() requires Bound<PyAny>
         let back = SafeManagedTensorVersioned::extract((capsule.as_any()).into()).unwrap();
         let slice: &[f32] = back.as_slice_contiguous().unwrap();
