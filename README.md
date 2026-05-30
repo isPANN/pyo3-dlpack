@@ -21,7 +21,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-pyo3-dlpack = "0.2"
+pyo3-dlpack = "0.3"
 pyo3 = "0.28"
 ```
 
