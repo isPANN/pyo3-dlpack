@@ -13,6 +13,7 @@ the [DLPack](https://github.com/dmlc/dlpack) protocol.
 - **Bidirectional**: Import tensors from Python and export tensors to Python
 - **Device-agnostic**: Works with CPU, CUDA, ROCm, and other devices
 - **DLPack 1.0**: Versioned protocol with read-only tensors — auto-negotiated on import, fully backward-compatible with legacy producers
+- **Benchmarked**: zero-copy stays O(1)/flat-memory where copy-based interop is O(n)/2×-memory (≈54,000× faster at 100M elements), and at parity with `dlpark` — see [BENCHMARKS.md](BENCHMARKS.md)
 
 ## Installation
 
