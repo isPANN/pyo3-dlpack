@@ -241,9 +241,16 @@ fn build_dl_tensor(
 /// and the shape/strides arrays together. No-op on a null context. `C` must be
 /// the exact `ManagedContext<T, M>` the box was created as.
 unsafe fn free_managed_ctx<C>(manager_ctx: *mut c_void) {
-    if !manager_ctx.is_null() {
-        let _ = Box::from_raw(manager_ctx as *mut C);
+    if manager_ctx.is_null() {
+        return;
     }
+    // Dropping the box runs the user tensor `T`'s `Drop`, which is arbitrary
+    // code that may panic. This executes inside an `extern "C"` deleter called
+    // from CPython / consumer C frames, so a panic must not unwind across the
+    // FFI boundary (doing so is undefined behavior). Contain it here.
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        drop(Box::from_raw(manager_ctx as *mut C));
+    }));
 }
 
 /// Wire a capsule around an already-built owning box, shared by both export
@@ -287,11 +294,89 @@ unsafe fn unconsumed_managed_ptr(
     pyo3::ffi::PyCapsule_GetPointer(capsule_ptr, name_ptr)
 }
 
-/// Export a tensor to a `dltensor` PyCapsule in a single heap allocation.
-fn export_to_capsule<T: IntoDLPack>(
+/// Shared behavior of the two FFI managed structs ([`DLManagedTensor`] and
+/// [`DLManagedTensorVersioned`]) so the export, deleter, and capsule-destructor
+/// logic is written once and monomorphized per layout instead of copy-pasted.
+trait ManagedStruct: Sized {
+    /// Capsule name a fresh (unconsumed) capsule of this layout carries.
+    const CAPSULE_NAME: &'static CStr;
+    /// Capsule name a consumer renames to once it has taken ownership.
+    const USED_NAME: &'static CStr;
+    /// Read the opaque owning-context pointer (the box base).
+    fn manager_ctx(&self) -> *mut c_void;
+    /// Point `manager_ctx` at the owning box base.
+    fn set_manager_ctx(&mut self, ctx: *mut c_void);
+    /// The consumer-invoked deleter stored in the struct, if any.
+    fn deleter(&self) -> Option<unsafe extern "C" fn(*mut Self)>;
+}
+
+impl ManagedStruct for DLManagedTensor {
+    const CAPSULE_NAME: &'static CStr = DLPACK_CAPSULE_NAME;
+    const USED_NAME: &'static CStr = DLPACK_CAPSULE_NAME_USED;
+    fn manager_ctx(&self) -> *mut c_void {
+        self.manager_ctx
+    }
+    fn set_manager_ctx(&mut self, ctx: *mut c_void) {
+        self.manager_ctx = ctx;
+    }
+    fn deleter(&self) -> Option<unsafe extern "C" fn(*mut Self)> {
+        self.deleter
+    }
+}
+
+impl ManagedStruct for DLManagedTensorVersioned {
+    const CAPSULE_NAME: &'static CStr = DLPACK_VERSIONED_CAPSULE_NAME;
+    const USED_NAME: &'static CStr = DLPACK_VERSIONED_CAPSULE_NAME_USED;
+    fn manager_ctx(&self) -> *mut c_void {
+        self.manager_ctx
+    }
+    fn set_manager_ctx(&mut self, ctx: *mut c_void) {
+        self.manager_ctx = ctx;
+    }
+    fn deleter(&self) -> Option<unsafe extern "C" fn(*mut Self)> {
+        self.deleter
+    }
+}
+
+/// Raw PyCapsule destructor for an unconsumed capsule of layout `M` — called by
+/// Python when GC'ing it. A consumer that took ownership (e.g.
+/// `torch.from_dlpack`) renamed it to `M::USED_NAME` and calls the deleter
+/// itself, which [`unconsumed_managed_ptr`] detects (returning null) so we never
+/// double-free.
+unsafe extern "C" fn raw_capsule_destructor<M: ManagedStruct>(
+    capsule_ptr: *mut pyo3::ffi::PyObject,
+) {
+    let managed_ptr = unconsumed_managed_ptr(capsule_ptr, M::USED_NAME) as *mut M;
+    if managed_ptr.is_null() {
+        return;
+    }
+    if let Some(deleter) = (*managed_ptr).deleter() {
+        deleter(managed_ptr);
+    }
+}
+
+/// Deleter for managed tensors of layout `M`, called by the consumer when done.
+///
+/// `managed_ptr` points at the `managed` field *inside* the owning
+/// `ManagedContext`; `manager_ctx` points at the box base.
+unsafe extern "C" fn dlpack_deleter<T, M: ManagedStruct>(managed_ptr: *mut M) {
+    if managed_ptr.is_null() {
+        return;
+    }
+    free_managed_ctx::<ManagedContext<T, M>>((*managed_ptr).manager_ctx());
+}
+
+/// Export a tensor to a single-allocation PyCapsule of layout `M`. `build` turns
+/// the prepared [`DLTensor`] into the concrete managed struct (with its deleter
+/// and any version/flags); everything else — stride validation, the owning box,
+/// the self-referential `manager_ctx`, and capsule creation/cleanup — is shared
+/// by the legacy and versioned paths.
+fn export_to_capsule_with<T: IntoDLPack, M: ManagedStruct>(
     py: Python<'_>,
     tensor: T,
     info: TensorInfo,
+    err_msg: &str,
+    build: impl FnOnce(DLTensor) -> M,
 ) -> PyResult<Py<PyAny>> {
     validate_strides(&info)?;
     let TensorInfo {
@@ -307,11 +392,7 @@ fn export_to_capsule<T: IntoDLPack>(
     let dl_tensor = build_dl_tensor(data, device, dtype, byte_offset, &shape, &strides);
 
     let ctx_ptr = Box::into_raw(Box::new(ManagedContext {
-        managed: DLManagedTensor {
-            dl_tensor,
-            manager_ctx: std::ptr::null_mut(),
-            deleter: Some(dlpack_deleter::<T>),
-        },
+        managed: build(dl_tensor),
         tensor,
         shape,
         strides,
@@ -320,43 +401,36 @@ fn export_to_capsule<T: IntoDLPack>(
     // The capsule stores the address of the `managed` field; the deleter recovers
     // the whole box via `manager_ctx`.
     unsafe {
-        (*ctx_ptr).managed.manager_ctx = ctx_ptr as *mut c_void;
-        let managed_field = &mut (*ctx_ptr).managed as *mut DLManagedTensor as *mut c_void;
+        (*ctx_ptr).managed.set_manager_ctx(ctx_ptr as *mut c_void);
+        let managed_field = &mut (*ctx_ptr).managed as *mut M as *mut c_void;
         into_capsule(
             py,
             ctx_ptr,
             managed_field,
-            DLPACK_CAPSULE_NAME,
-            raw_capsule_destructor,
-            "Failed to create DLPack capsule",
+            M::CAPSULE_NAME,
+            raw_capsule_destructor::<M>,
+            err_msg,
         )
     }
 }
 
-/// Raw PyCapsule destructor for legacy (`dltensor`) capsules — called by Python
-/// when GC'ing an unconsumed capsule. A consumer that took ownership (e.g.
-/// `torch.from_dlpack`) renamed it to `used_dltensor` and calls the deleter
-/// itself, which [`unconsumed_managed_ptr`] detects.
-unsafe extern "C" fn raw_capsule_destructor(capsule_ptr: *mut pyo3::ffi::PyObject) {
-    let managed_ptr =
-        unconsumed_managed_ptr(capsule_ptr, DLPACK_CAPSULE_NAME_USED) as *mut DLManagedTensor;
-    if managed_ptr.is_null() {
-        return;
-    }
-    if let Some(deleter) = (*managed_ptr).deleter {
-        deleter(managed_ptr);
-    }
-}
-
-/// Deleter for legacy managed tensors, called by the consumer when done.
-///
-/// `managed_ptr` points at the `managed` field *inside* the owning
-/// `ManagedContext`; `manager_ctx` points at the box base.
-unsafe extern "C" fn dlpack_deleter<T>(managed_ptr: *mut DLManagedTensor) {
-    if managed_ptr.is_null() {
-        return;
-    }
-    free_managed_ctx::<ManagedContext<T, DLManagedTensor>>((*managed_ptr).manager_ctx);
+/// Export a tensor to a legacy (`dltensor`) PyCapsule.
+fn export_to_capsule<T: IntoDLPack>(
+    py: Python<'_>,
+    tensor: T,
+    info: TensorInfo,
+) -> PyResult<Py<PyAny>> {
+    export_to_capsule_with::<T, DLManagedTensor>(
+        py,
+        tensor,
+        info,
+        "Failed to create DLPack capsule",
+        |dl_tensor| DLManagedTensor {
+            dl_tensor,
+            manager_ctx: std::ptr::null_mut(),
+            deleter: Some(dlpack_deleter::<T, DLManagedTensor>),
+        },
+    )
 }
 
 /// Export a tensor to a versioned (`dltensor_versioned`) PyCapsule with the
@@ -367,67 +441,22 @@ fn export_to_capsule_versioned<T: IntoDLPack>(
     info: TensorInfo,
     flags: u64,
 ) -> PyResult<Py<PyAny>> {
-    validate_strides(&info)?;
-    let TensorInfo {
-        data,
-        device,
-        dtype,
-        shape,
-        strides,
-        byte_offset,
-    } = info;
-    let dl_tensor = build_dl_tensor(data, device, dtype, byte_offset, &shape, &strides);
-
-    let ctx_ptr = Box::into_raw(Box::new(ManagedContext {
-        managed: DLManagedTensorVersioned {
+    export_to_capsule_with::<T, DLManagedTensorVersioned>(
+        py,
+        tensor,
+        info,
+        "Failed to create versioned DLPack capsule",
+        |dl_tensor| DLManagedTensorVersioned {
             version: DLPackVersion {
                 major: DLPACK_MAJOR_VERSION,
                 minor: DLPACK_MINOR_VERSION,
             },
             manager_ctx: std::ptr::null_mut(),
-            deleter: Some(dlpack_deleter_versioned::<T>),
+            deleter: Some(dlpack_deleter::<T, DLManagedTensorVersioned>),
             flags,
             dl_tensor,
         },
-        tensor,
-        shape,
-        strides,
-    }));
-
-    unsafe {
-        (*ctx_ptr).managed.manager_ctx = ctx_ptr as *mut c_void;
-        let managed_field =
-            &mut (*ctx_ptr).managed as *mut DLManagedTensorVersioned as *mut c_void;
-        into_capsule(
-            py,
-            ctx_ptr,
-            managed_field,
-            DLPACK_VERSIONED_CAPSULE_NAME,
-            raw_capsule_destructor_versioned,
-            "Failed to create versioned DLPack capsule",
-        )
-    }
-}
-
-/// Raw PyCapsule destructor for versioned (`dltensor_versioned`) capsules.
-/// Mirrors [`raw_capsule_destructor`] but reads a `DLManagedTensorVersioned`.
-unsafe extern "C" fn raw_capsule_destructor_versioned(capsule_ptr: *mut pyo3::ffi::PyObject) {
-    let managed_ptr = unconsumed_managed_ptr(capsule_ptr, DLPACK_VERSIONED_CAPSULE_NAME_USED)
-        as *mut DLManagedTensorVersioned;
-    if managed_ptr.is_null() {
-        return;
-    }
-    if let Some(deleter) = (*managed_ptr).deleter {
-        deleter(managed_ptr);
-    }
-}
-
-/// Deleter for versioned managed tensors, called by the consumer when done.
-unsafe extern "C" fn dlpack_deleter_versioned<T>(managed_ptr: *mut DLManagedTensorVersioned) {
-    if managed_ptr.is_null() {
-        return;
-    }
-    free_managed_ctx::<ManagedContext<T, DLManagedTensorVersioned>>((*managed_ptr).manager_ctx);
+    )
 }
 
 #[cfg(test)]
@@ -841,7 +870,7 @@ mod tests {
     fn test_deleter_null_check() {
         // Test that dlpack_deleter handles null safely
         unsafe {
-            dlpack_deleter::<TestTensor>(std::ptr::null_mut());
+            dlpack_deleter::<TestTensor, DLManagedTensor>(std::ptr::null_mut());
         }
         // Should not crash
     }
@@ -850,7 +879,7 @@ mod tests {
     fn test_capsule_destructor_null_check() {
         // Test that raw_capsule_destructor handles null safely
         unsafe {
-            raw_capsule_destructor(std::ptr::null_mut());
+            raw_capsule_destructor::<DLManagedTensor>(std::ptr::null_mut());
         }
         // Should not crash
     }
@@ -859,7 +888,7 @@ mod tests {
     fn test_versioned_deleter_null_check() {
         // Versioned deleter must handle a null pointer safely.
         unsafe {
-            dlpack_deleter_versioned::<TestTensor>(std::ptr::null_mut());
+            dlpack_deleter::<TestTensor, DLManagedTensorVersioned>(std::ptr::null_mut());
         }
     }
 
@@ -867,7 +896,7 @@ mod tests {
     fn test_versioned_capsule_destructor_null_check() {
         // Versioned capsule destructor must handle a null pointer safely.
         unsafe {
-            raw_capsule_destructor_versioned(std::ptr::null_mut());
+            raw_capsule_destructor::<DLManagedTensorVersioned>(std::ptr::null_mut());
         }
     }
 

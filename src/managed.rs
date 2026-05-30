@@ -27,6 +27,39 @@ enum ManagedPtr {
     Versioned(NonNull<DLManagedTensorVersioned>),
 }
 
+impl ManagedPtr {
+    /// Borrow the embedded `DLTensor`, which lives at a different offset in the
+    /// unversioned vs. versioned managed struct.
+    ///
+    /// # Safety
+    /// The pointer must still address a live managed tensor of its layout.
+    unsafe fn dl_tensor(&self) -> &DLTensor {
+        match *self {
+            ManagedPtr::Unversioned(p) => &p.as_ref().dl_tensor,
+            ManagedPtr::Versioned(p) => &p.as_ref().dl_tensor,
+        }
+    }
+
+    /// Invoke the producer's deleter (if present) at the correct struct offset.
+    ///
+    /// # Safety
+    /// Must be called at most once, when relinquishing ownership of the tensor.
+    unsafe fn run_deleter(&self) {
+        match *self {
+            ManagedPtr::Unversioned(p) => {
+                if let Some(deleter) = p.as_ref().deleter {
+                    deleter(p.as_ptr());
+                }
+            }
+            ManagedPtr::Versioned(p) => {
+                if let Some(deleter) = p.as_ref().deleter {
+                    deleter(p.as_ptr());
+                }
+            }
+        }
+    }
+}
+
 /// A tensor imported from Python via the DLPack protocol.
 ///
 /// This type wraps a `DLManagedTensor` received from a Python object
@@ -73,16 +106,24 @@ pub struct PyTensor {
 // (the producer guarantees this by implementing DLPack)
 unsafe impl Send for PyTensor {}
 
+/// Reject a managed tensor whose `ndim` is negative. `ndim` is an `i32`, and a
+/// negative value would cast to a near-`usize::MAX` length in `shape()` /
+/// `strides()`, producing a slice that reads far out of bounds. Refuse it at the
+/// import boundary before any accessor can trust it.
+fn validate_ndim(ndim: i32) -> PyResult<()> {
+    if ndim < 0 {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "DLPack tensor has negative ndim: {ndim}"
+        )));
+    }
+    Ok(())
+}
+
 impl PyTensor {
     /// Borrow the embedded `DLTensor`, which lives at a different offset in the
     /// unversioned vs. versioned managed struct.
     fn dl_tensor(&self) -> &DLTensor {
-        unsafe {
-            match self.managed {
-                ManagedPtr::Unversioned(p) => &p.as_ref().dl_tensor,
-                ManagedPtr::Versioned(p) => &p.as_ref().dl_tensor,
-            }
-        }
+        unsafe { self.managed.dl_tensor() }
     }
 
     /// Create a PyTensor from a Python object that supports the DLPack protocol.
@@ -171,8 +212,17 @@ impl PyTensor {
             pyo3::exceptions::PyValueError::new_err("DLPack capsule contains null pointer")
         })?;
 
+        // Reject a malformed negative ndim before renaming, so a rejected
+        // capsule is left unconsumed for the producer's destructor to free.
+        validate_ndim(unsafe { managed.as_ref().dl_tensor.ndim })?;
+
         // Per DLPack protocol, rename to "used_dltensor" to take ownership and
         // prevent double-consume / double-free.
+        //
+        // SAFETY: reading the pointer above and renaming the capsule here are two
+        // steps, not one atomic operation. They are sound only because the GIL
+        // serializes consumers; a future free-threaded (no-GIL) build would need
+        // an external lock to prevent a double-consume race.
         let set_name_result = unsafe {
             pyo3::ffi::PyCapsule_SetName(capsule.as_ptr(), DLPACK_CAPSULE_NAME_USED.as_ptr())
         };
@@ -210,6 +260,13 @@ impl PyTensor {
             )));
         }
 
+        // Reject a malformed negative ndim before renaming (see
+        // `from_unversioned_capsule`); the version check above guarantees the
+        // struct layout is ours, so reading `dl_tensor.ndim` is sound.
+        validate_ndim(unsafe { managed.as_ref().dl_tensor.ndim })?;
+
+        // SAFETY: as in `from_unversioned_capsule`, the read-then-rename consume
+        // is sound only under the GIL's serialization of consumers.
         let set_name_result = unsafe {
             pyo3::ffi::PyCapsule_SetName(
                 capsule.as_ptr(),
@@ -298,7 +355,10 @@ impl PyTensor {
     /// The pointer is adjusted by `byte_offset()`.
     pub fn data_ptr(&self) -> *mut c_void {
         let tensor = self.dl_tensor();
-        unsafe { (tensor.data as *mut u8).add(tensor.byte_offset as usize) as *mut c_void }
+        // `wrapping_add` (not `add`): the base may be null (0-element tensor) or a
+        // non-host device pointer, where `add`'s in-bounds/provenance requirement
+        // would be undefined behavior. The numeric result is identical.
+        (tensor.data as *mut u8).wrapping_add(tensor.byte_offset as usize) as *mut c_void
     }
 
     /// Get the raw data pointer without byte offset adjustment.
@@ -342,21 +402,8 @@ impl PyTensor {
 
 impl Drop for PyTensor {
     fn drop(&mut self) {
-        // Call the deleter if present, at the correct struct offset for each layout.
-        unsafe {
-            match self.managed {
-                ManagedPtr::Unversioned(p) => {
-                    if let Some(deleter) = p.as_ref().deleter {
-                        deleter(p.as_ptr());
-                    }
-                }
-                ManagedPtr::Versioned(p) => {
-                    if let Some(deleter) = p.as_ref().deleter {
-                        deleter(p.as_ptr());
-                    }
-                }
-            }
-        }
+        // Call the producer's deleter at the correct struct offset for each layout.
+        unsafe { self.managed.run_deleter() }
     }
 }
 
