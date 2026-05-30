@@ -12,6 +12,8 @@ the [DLPack](https://github.com/dmlc/dlpack) protocol.
 - **PyO3 0.28+**: Uses the modern API (no deprecation warnings)
 - **Bidirectional**: Import tensors from Python and export tensors to Python
 - **Device-agnostic**: Works with CPU, CUDA, ROCm, and other devices
+- **DLPack 1.0**: Versioned protocol with read-only tensors — auto-negotiated on import, fully backward-compatible with legacy producers
+- **Benchmarked**: zero-copy stays O(1)/flat-memory where copy-based interop is O(n)/2×-memory (≈54,000× faster at 100M elements), and at parity with `dlpark` — see [BENCHMARKS.md](BENCHMARKS.md)
 
 ## Installation
 
@@ -38,6 +40,12 @@ fn process_tensor(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<()> {
     println!("Shape: {:?}", tensor.shape());
     println!("Device: {:?}", tensor.device());
     println!("Dtype: {:?}", tensor.dtype());
+
+    // Respect the producer's read-only flag (DLPack 1.0); legacy producers
+    // always report `false`.
+    if tensor.is_read_only() {
+        // Treat the data as immutable.
+    }
 
     if tensor.device().is_cpu() {
         // Safe to access data on CPU
@@ -96,6 +104,28 @@ capsule = create_tensor()
 tensor = torch.from_dlpack(capsule)
 ```
 
+### Read-only and versioned DLPack
+
+`pyo3-dlpack` speaks both the legacy and the versioned (DLPack 1.0) protocol,
+and negotiation is automatic — you do not have to choose.
+
+- **Import** (`PyTensor::from_pyany`) advertises versioned support to the
+  producer and transparently accepts either a legacy `dltensor` capsule or a
+  versioned `dltensor_versioned` one. Call `tensor.is_read_only()` to check the
+  read-only flag (always `false` for legacy producers, which cannot express it).
+- **Export** keeps `into_dlpack` unchanged (a writable legacy capsule, for
+  maximum consumer compatibility). To export a read-only tensor, use
+  `into_dlpack_readonly`, which emits a versioned capsule with the read-only
+  flag set:
+
+```rust
+#[pyfunction]
+fn create_readonly_tensor(py: Python<'_>) -> PyResult<Py<PyAny>> {
+    let tensor = MyTensor { /* ... */ };
+    tensor.into_dlpack_readonly(py)
+}
+```
+
 ## Supported Data Types
 
 - Float: f16, f32, f64, bf16
@@ -115,35 +145,38 @@ tensor = torch.from_dlpack(capsule)
 
 ## Performance
 
-DLPack enables true zero-copy tensor sharing. Benchmark results on Apple M3:
+DLPack enables true zero-copy tensor sharing: only metadata is processed, never the
+data, so cost is constant regardless of tensor size. Copy-based interop is O(n) in
+both time and peak memory. Representative results on Apple M3 (see
+[BENCHMARKS.md](BENCHMARKS.md) for the full methodology, the `dlpark` head-to-head,
+and reproduce commands):
 
-| Operation | Time | vs Copy |
-|-----------|------|---------|
-| DLPack capsule export (1M f32) | **8.3 µs** | 7.3x faster |
-| DLPack capsule import (1M f32) | **7.9 µs** | 7.7x faster |
-| Vec clone baseline (1M f32) | 60.9 µs | - |
+| Operation (1M f32) | pyo3-dlpack (zero-copy) | Copy baseline |
+|--------------------|-------------------------|---------------|
+| Export Rust → Python | **~3.2 µs** | ~99 µs (`Vec::clone` / `rust-numpy`) |
+| Import Python → Rust | **~2.5 µs** | — |
 
-The DLPack overhead is constant regardless of tensor size - only metadata is processed,
-not the actual data. This makes it ideal for large tensors where copying would be expensive.
+The gap widens with size. Importing zero-copy from Python stays **flat at ~0.5 µs**
+from 1M to 100M elements, while `numpy.copy()` grows to **~28 ms** at 100M — roughly
+**54,000× faster** — and a zero-copy import adds **0 MiB** of resident memory where a
+copy adds the full buffer (≈191 MiB for a 191 MiB array).
 
-```
-# Rust criterion benchmarks (cargo bench)
-export_capsule_1k       time:   [155.44 ns 159.74 ns 166.84 ns]
-export_capsule_1m       time:   [7.71 µs 8.26 µs 8.89 µs]
-import_capsule_1m       time:   [7.44 µs 7.89 µs 8.41 µs]
-vec_clone_1m            time:   [60.45 µs 60.90 µs 61.38 µs]
-```
+Against [`dlpark`](https://github.com/SunDoge/dlpark) (the mature Rust DLPack crate),
+raw throughput is at **parity** — both are zero-copy capsule wrappers. See
+[BENCHMARKS.md](BENCHMARKS.md) for the per-size head-to-head.
 
-Run benchmarks yourself:
-- `make bench-rust` - Rust criterion benchmarks
-- `make bench-python` - Python benchmarks
-- `make bench` - All benchmarks
+Run the benchmarks yourself (`cargo bench` needs Rust ≥ 1.85 for the `dlpark`
+dev-dependency):
+- `make bench-rust` — Rust criterion head-to-head (`cargo bench --bench dlpack`)
+- `make bench-python` — Python benchmarks; also `python benchmarks/bench_dlpack.py --compare` and `--memory`, and `python benchmarks/interop_probe.py`
+- `make bench` — all benchmarks
 
 ## Testing
 
 Validate correctness and zero-copy behavior:
-- `make test` - Unit + integration tests (105 tests)
-- Tests verify data pointers are preserved across transfers
+- `make test` - Rust unit tests + Python integration tests
+- Tests verify data pointers are preserved across transfers, capsule
+  ownership (no double-free), and the versioned/read-only round-trip
 
 ### Python environment
 The test module is built with `maturin` using the same interpreter as tests.

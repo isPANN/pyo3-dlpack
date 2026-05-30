@@ -3,18 +3,62 @@
 //! This module provides `PyTensor`, a wrapper around a DLPack tensor
 //! received from Python that provides safe access to tensor metadata.
 
-use crate::ffi::{DLDataType, DLDevice, DLManagedTensor};
-use crate::DLPACK_CAPSULE_NAME;
+use crate::ffi::{
+    DLDataType, DLDevice, DLManagedTensor, DLManagedTensorVersioned, DLTensor,
+    DLPACK_FLAG_BITMASK_READ_ONLY, DLPACK_MAJOR_VERSION, DLPACK_MINOR_VERSION,
+};
+use crate::{
+    DLPACK_CAPSULE_NAME, DLPACK_CAPSULE_NAME_USED, DLPACK_VERSIONED_CAPSULE_NAME,
+    DLPACK_VERSIONED_CAPSULE_NAME_USED,
+};
 use pyo3::prelude::*;
 use pyo3::types::PyCapsule;
-use std::ffi::{c_char, c_void};
+use std::ffi::{c_void, CStr};
 use std::ptr::NonNull;
 
-/// The name for consumed DLPack capsules (per DLPack protocol).
-/// Using a static byte array with null terminator for C compatibility.
-/// This must remain valid for the lifetime of the program since PyCapsule_SetName
-/// stores the pointer directly without copying.
-static USED_DLTENSOR_NAME: &[u8] = b"used_dltensor\0";
+/// Which managed-tensor layout backs a [`PyTensor`].
+///
+/// The embedded `DLTensor` lives at a different offset in the unversioned vs.
+/// versioned struct, and each has its own deleter signature, so we keep the
+/// typed owning pointer and branch where layout matters.
+#[derive(Clone, Copy)]
+enum ManagedPtr {
+    Unversioned(NonNull<DLManagedTensor>),
+    Versioned(NonNull<DLManagedTensorVersioned>),
+}
+
+impl ManagedPtr {
+    /// Borrow the embedded `DLTensor`, which lives at a different offset in the
+    /// unversioned vs. versioned managed struct.
+    ///
+    /// # Safety
+    /// The pointer must still address a live managed tensor of its layout.
+    unsafe fn dl_tensor(&self) -> &DLTensor {
+        match *self {
+            ManagedPtr::Unversioned(p) => &p.as_ref().dl_tensor,
+            ManagedPtr::Versioned(p) => &p.as_ref().dl_tensor,
+        }
+    }
+
+    /// Invoke the producer's deleter (if present) at the correct struct offset.
+    ///
+    /// # Safety
+    /// Must be called at most once, when relinquishing ownership of the tensor.
+    unsafe fn run_deleter(&self) {
+        match *self {
+            ManagedPtr::Unversioned(p) => {
+                if let Some(deleter) = p.as_ref().deleter {
+                    deleter(p.as_ptr());
+                }
+            }
+            ManagedPtr::Versioned(p) => {
+                if let Some(deleter) = p.as_ref().deleter {
+                    deleter(p.as_ptr());
+                }
+            }
+        }
+    }
+}
 
 /// A tensor imported from Python via the DLPack protocol.
 ///
@@ -51,7 +95,7 @@ static USED_DLTENSOR_NAME: &[u8] = b"used_dltensor\0";
 /// }
 /// ```
 pub struct PyTensor {
-    managed: NonNull<DLManagedTensor>,
+    managed: ManagedPtr,
     /// We store the capsule to prevent it from being garbage collected
     /// while we hold a reference to the managed tensor.
     #[allow(dead_code)]
@@ -62,7 +106,26 @@ pub struct PyTensor {
 // (the producer guarantees this by implementing DLPack)
 unsafe impl Send for PyTensor {}
 
+/// Reject a managed tensor whose `ndim` is negative. `ndim` is an `i32`, and a
+/// negative value would cast to a near-`usize::MAX` length in `shape()` /
+/// `strides()`, producing a slice that reads far out of bounds. Refuse it at the
+/// import boundary before any accessor can trust it.
+fn validate_ndim(ndim: i32) -> PyResult<()> {
+    if ndim < 0 {
+        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "DLPack tensor has negative ndim: {ndim}"
+        )));
+    }
+    Ok(())
+}
+
 impl PyTensor {
+    /// Borrow the embedded `DLTensor`, which lives at a different offset in the
+    /// unversioned vs. versioned managed struct.
+    fn dl_tensor(&self) -> &DLTensor {
+        unsafe { self.managed.dl_tensor() }
+    }
+
     /// Create a PyTensor from a Python object that supports the DLPack protocol.
     ///
     /// This calls `__dlpack__()` on the object to get a DLPack capsule,
@@ -80,8 +143,25 @@ impl PyTensor {
     /// - The returned capsule is invalid
     /// - The capsule doesn't contain a valid DLManagedTensor
     pub fn from_pyany(_py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<Self> {
-        // Call __dlpack__() to get the capsule
-        let capsule_obj = obj.call_method0("__dlpack__")?;
+        let py = obj.py();
+
+        // Advertise versioned support via max_version. Producers whose
+        // __dlpack__ predates the kwarg raise TypeError; fall back to a no-arg
+        // call for them. The actual capsule kind is decided later by name.
+        let kwargs = pyo3::types::PyDict::new(py);
+        kwargs.set_item(
+            pyo3::intern!(py, "max_version"),
+            (DLPACK_MAJOR_VERSION, DLPACK_MINOR_VERSION),
+        )?;
+
+        let capsule_obj = match obj.call_method("__dlpack__", (), Some(&kwargs)) {
+            Ok(c) => c,
+            Err(e) if e.is_instance_of::<pyo3::exceptions::PyTypeError>(py) => {
+                obj.call_method0("__dlpack__")?
+            }
+            Err(e) => return Err(e),
+        };
+
         let capsule: Bound<'_, PyCapsule> = capsule_obj.cast_into().map_err(|e| {
             pyo3::exceptions::PyTypeError::new_err(format!(
                 "__dlpack__ did not return a PyCapsule: {:?}",
@@ -101,72 +181,134 @@ impl PyTensor {
     ///
     /// Returns an error if the capsule is invalid or has the wrong name.
     pub fn from_capsule(capsule: &Bound<'_, PyCapsule>) -> PyResult<Self> {
-        // Extract the pointer using pointer_checked which also validates the capsule name.
-        // This will fail if the capsule was already consumed (name is "used_dltensor").
+        // Decide which DLPack layout this capsule carries by reading its name.
+        // A producer may return a legacy capsule even when versioned was
+        // requested, so we dispatch on the actual name, never on assumptions.
+        let name_ptr = unsafe { pyo3::ffi::PyCapsule_GetName(capsule.as_ptr()) };
+        if name_ptr.is_null() {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "DLPack capsule has no name",
+            ));
+        }
+        let name = unsafe { CStr::from_ptr(name_ptr) };
+        let name_bytes = name.to_bytes();
+
+        if name_bytes == DLPACK_CAPSULE_NAME.to_bytes() {
+            Self::from_unversioned_capsule(capsule)
+        } else if name_bytes == DLPACK_VERSIONED_CAPSULE_NAME.to_bytes() {
+            Self::from_versioned_capsule(capsule)
+        } else {
+            Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "unexpected DLPack capsule name: {:?}",
+                name
+            )))
+        }
+    }
+
+    /// Consume an unversioned (`dltensor`) capsule.
+    fn from_unversioned_capsule(capsule: &Bound<'_, PyCapsule>) -> PyResult<Self> {
         let ptr = capsule.pointer_checked(Some(DLPACK_CAPSULE_NAME))?;
         let managed = NonNull::new(ptr.as_ptr() as *mut DLManagedTensor).ok_or_else(|| {
             pyo3::exceptions::PyValueError::new_err("DLPack capsule contains null pointer")
         })?;
 
-        // Per DLPack protocol, rename the capsule to "used_dltensor" to indicate
-        // we have taken ownership. This prevents:
-        // 1. Multiple consumers from using the same capsule (second consumer
-        //    will fail the name check above)
-        // 2. The producer's capsule destructor from calling the deleter
-        //    (it checks for this name and skips the deleter call)
+        // Reject a malformed negative ndim before renaming, so a rejected
+        // capsule is left unconsumed for the producer's destructor to free.
+        validate_ndim(unsafe { managed.as_ref().dl_tensor.ndim })?;
+
+        // Per DLPack protocol, rename to "used_dltensor" to take ownership and
+        // prevent double-consume / double-free.
         //
-        // We use a static string because PyCapsule_SetName stores the pointer
-        // directly without copying.
-        //
-        // SAFETY: We must check the return value. If PyCapsule_SetName fails:
-        // - Returns -1 and sets a Python exception
-        // - The capsule name remains "dltensor", enabling double-consume/double-free
+        // SAFETY: reading the pointer above and renaming the capsule here are two
+        // steps, not one atomic operation. They are sound only because the GIL
+        // serializes consumers; a future free-threaded (no-GIL) build would need
+        // an external lock to prevent a double-consume race.
         let set_name_result = unsafe {
-            pyo3::ffi::PyCapsule_SetName(
-                capsule.as_ptr(),
-                USED_DLTENSOR_NAME.as_ptr() as *const c_char,
-            )
+            pyo3::ffi::PyCapsule_SetName(capsule.as_ptr(), DLPACK_CAPSULE_NAME_USED.as_ptr())
         };
         if set_name_result != 0 {
-            // PyCapsule_SetName failed (returns -1 on error)
-            // A Python exception is already set, convert it to PyErr
             return Err(pyo3::exceptions::PyRuntimeError::new_err(
                 "Failed to mark DLPack capsule as consumed: PyCapsule_SetName failed",
             ));
         }
 
         Ok(Self {
-            managed,
+            managed: ManagedPtr::Unversioned(managed),
+            capsule: capsule.clone().unbind(),
+        })
+    }
+
+    /// Consume a versioned (`dltensor_versioned`) capsule.
+    fn from_versioned_capsule(capsule: &Bound<'_, PyCapsule>) -> PyResult<Self> {
+        let ptr = capsule.pointer_checked(Some(DLPACK_VERSIONED_CAPSULE_NAME))?;
+        let managed =
+            NonNull::new(ptr.as_ptr() as *mut DLManagedTensorVersioned).ok_or_else(|| {
+                pyo3::exceptions::PyValueError::new_err("DLPack capsule contains null pointer")
+            })?;
+
+        // Reject ANY major-version mismatch, per the DLPack spec: a different
+        // major version may lay out the struct body (flags, dl_tensor)
+        // differently, so we must not read past the version field. Minor
+        // versions are ABI-compatible, so they are accepted. We return before
+        // renaming the capsule, leaving the producer's destructor to call the
+        // deleter (which lives at a stable offset across major versions).
+        let version = unsafe { managed.as_ref().version };
+        if version.major != DLPACK_MAJOR_VERSION {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "unsupported DLPack major version {}.{} (this build supports major version {})",
+                version.major, version.minor, DLPACK_MAJOR_VERSION
+            )));
+        }
+
+        // Reject a malformed negative ndim before renaming (see
+        // `from_unversioned_capsule`); the version check above guarantees the
+        // struct layout is ours, so reading `dl_tensor.ndim` is sound.
+        validate_ndim(unsafe { managed.as_ref().dl_tensor.ndim })?;
+
+        // SAFETY: as in `from_unversioned_capsule`, the read-then-rename consume
+        // is sound only under the GIL's serialization of consumers.
+        let set_name_result = unsafe {
+            pyo3::ffi::PyCapsule_SetName(
+                capsule.as_ptr(),
+                DLPACK_VERSIONED_CAPSULE_NAME_USED.as_ptr(),
+            )
+        };
+        if set_name_result != 0 {
+            return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                "Failed to mark DLPack capsule as consumed: PyCapsule_SetName failed",
+            ));
+        }
+
+        Ok(Self {
+            managed: ManagedPtr::Versioned(managed),
             capsule: capsule.clone().unbind(),
         })
     }
 
     /// Get the device where the tensor data resides.
     pub fn device(&self) -> DLDevice {
-        unsafe { self.managed.as_ref().dl_tensor.device }
+        self.dl_tensor().device
     }
 
     /// Get the data type of the tensor elements.
     pub fn dtype(&self) -> DLDataType {
-        unsafe { self.managed.as_ref().dl_tensor.dtype }
+        self.dl_tensor().dtype
     }
 
     /// Get the number of dimensions.
     pub fn ndim(&self) -> usize {
-        unsafe { self.managed.as_ref().dl_tensor.ndim as usize }
+        self.dl_tensor().ndim as usize
     }
 
     /// Get the shape as a slice.
     ///
     /// The length of the slice equals `ndim()`.
     pub fn shape(&self) -> &[i64] {
-        unsafe {
-            let tensor = &self.managed.as_ref().dl_tensor;
-            if tensor.shape.is_null() {
-                &[]
-            } else {
-                std::slice::from_raw_parts(tensor.shape, tensor.ndim as usize)
-            }
+        let tensor = self.dl_tensor();
+        if tensor.shape.is_null() {
+            &[]
+        } else {
+            unsafe { std::slice::from_raw_parts(tensor.shape, tensor.ndim as usize) }
         }
     }
 
@@ -175,16 +317,11 @@ impl PyTensor {
     /// Strides are in number of elements (not bytes).
     /// If `None`, the tensor is assumed to be in compact row-major order.
     pub fn strides(&self) -> Option<&[i64]> {
-        unsafe {
-            let tensor = &self.managed.as_ref().dl_tensor;
-            if tensor.strides.is_null() {
-                None
-            } else {
-                Some(std::slice::from_raw_parts(
-                    tensor.strides,
-                    tensor.ndim as usize,
-                ))
-            }
+        let tensor = self.dl_tensor();
+        if tensor.strides.is_null() {
+            None
+        } else {
+            Some(unsafe { std::slice::from_raw_parts(tensor.strides, tensor.ndim as usize) })
         }
     }
 
@@ -217,20 +354,21 @@ impl PyTensor {
     ///
     /// The pointer is adjusted by `byte_offset()`.
     pub fn data_ptr(&self) -> *mut c_void {
-        unsafe {
-            let tensor = &self.managed.as_ref().dl_tensor;
-            (tensor.data as *mut u8).add(tensor.byte_offset as usize) as *mut c_void
-        }
+        let tensor = self.dl_tensor();
+        // `wrapping_add` (not `add`): the base may be null (0-element tensor) or a
+        // non-host device pointer, where `add`'s in-bounds/provenance requirement
+        // would be undefined behavior. The numeric result is identical.
+        (tensor.data as *mut u8).wrapping_add(tensor.byte_offset as usize) as *mut c_void
     }
 
     /// Get the raw data pointer without byte offset adjustment.
     pub fn data_ptr_raw(&self) -> *mut c_void {
-        unsafe { self.managed.as_ref().dl_tensor.data }
+        self.dl_tensor().data
     }
 
     /// Get the byte offset from the raw data pointer.
     pub fn byte_offset(&self) -> u64 {
-        unsafe { self.managed.as_ref().dl_tensor.byte_offset }
+        self.dl_tensor().byte_offset
     }
 
     /// Get the total number of elements in the tensor.
@@ -247,17 +385,25 @@ impl PyTensor {
     pub fn nbytes(&self) -> usize {
         self.numel() * self.itemsize()
     }
+
+    /// Whether the tensor is marked read-only.
+    ///
+    /// Only versioned (DLPack 1.0) tensors can carry this flag; legacy tensors
+    /// always report `false`.
+    pub fn is_read_only(&self) -> bool {
+        match self.managed {
+            ManagedPtr::Unversioned(_) => false,
+            ManagedPtr::Versioned(p) => unsafe {
+                p.as_ref().flags & DLPACK_FLAG_BITMASK_READ_ONLY != 0
+            },
+        }
+    }
 }
 
 impl Drop for PyTensor {
     fn drop(&mut self) {
-        // Call the deleter if present
-        unsafe {
-            let managed = self.managed.as_ref();
-            if let Some(deleter) = managed.deleter {
-                deleter(self.managed.as_ptr());
-            }
-        }
+        // Call the producer's deleter at the correct struct offset for each layout.
+        unsafe { self.managed.run_deleter() }
     }
 }
 
@@ -720,7 +866,7 @@ mod tests {
 
             // Manually construct PyTensor for testing
             let pytensor = PyTensor {
-                managed,
+                managed: ManagedPtr::Unversioned(managed),
                 capsule: capsule.clone().unbind(),
             };
 
@@ -767,7 +913,7 @@ mod tests {
             let managed = NonNull::new(managed_ptr).unwrap();
 
             let pytensor = PyTensor {
-                managed,
+                managed: ManagedPtr::Unversioned(managed),
                 capsule: capsule.clone().unbind(),
             };
 
@@ -798,7 +944,7 @@ mod tests {
             let managed = NonNull::new(managed_ptr).unwrap();
 
             let pytensor = PyTensor {
-                managed,
+                managed: ManagedPtr::Unversioned(managed),
                 capsule: capsule.clone().unbind(),
             };
 
@@ -826,7 +972,7 @@ mod tests {
             let managed = NonNull::new(managed_ptr).unwrap();
 
             let pytensor = PyTensor {
-                managed,
+                managed: ManagedPtr::Unversioned(managed),
                 capsule: capsule.clone().unbind(),
             };
 
@@ -856,7 +1002,7 @@ mod tests {
             let managed = NonNull::new(managed_ptr).unwrap();
 
             let pytensor = PyTensor {
-                managed,
+                managed: ManagedPtr::Unversioned(managed),
                 capsule: capsule.clone().unbind(),
             };
 
@@ -886,7 +1032,7 @@ mod tests {
             let managed = NonNull::new(managed_ptr).unwrap();
 
             let pytensor = PyTensor {
-                managed,
+                managed: ManagedPtr::Unversioned(managed),
                 capsule: capsule.clone().unbind(),
             };
 
@@ -915,7 +1061,7 @@ mod tests {
             let managed = NonNull::new(managed_ptr).unwrap();
 
             let pytensor = PyTensor {
-                managed,
+                managed: ManagedPtr::Unversioned(managed),
                 capsule: capsule.clone().unbind(),
             };
 
@@ -944,7 +1090,7 @@ mod tests {
             let managed = NonNull::new(managed_ptr).unwrap();
 
             let pytensor = PyTensor {
-                managed,
+                managed: ManagedPtr::Unversioned(managed),
                 capsule: capsule.clone().unbind(),
             };
 
@@ -976,7 +1122,7 @@ mod tests {
 
             {
                 let pytensor = PyTensor {
-                    managed,
+                    managed: ManagedPtr::Unversioned(managed),
                     capsule: capsule.clone().unbind(),
                 };
 
@@ -1009,7 +1155,7 @@ mod tests {
             let managed = NonNull::new(managed_ptr).unwrap();
 
             let pytensor = PyTensor {
-                managed,
+                managed: ManagedPtr::Unversioned(managed),
                 capsule: capsule.clone().unbind(),
             };
 
@@ -1023,6 +1169,196 @@ mod tests {
                     let _ = Box::from_raw(managed.manager_ctx as *mut TestTensorContext);
                 }
             }
+        });
+    }
+
+    // ========================================================================
+    // Versioned / read-only round-trip tests
+    // ========================================================================
+
+    struct RoundTripTensor {
+        data: Vec<f32>,
+        shape: Vec<i64>,
+    }
+
+    impl crate::IntoDLPack for RoundTripTensor {
+        fn tensor_info(&self) -> crate::TensorInfo {
+            crate::TensorInfo::contiguous(
+                self.data.as_ptr() as *mut c_void,
+                cpu_device(),
+                dtype_f32(),
+                self.shape.clone(),
+            )
+        }
+    }
+
+    #[test]
+    fn test_roundtrip_versioned_readonly() {
+        use crate::IntoDLPack;
+        Python::attach(|py| {
+            let t = RoundTripTensor {
+                data: vec![1.0, 2.0, 3.0, 4.0],
+                shape: vec![2, 2],
+            };
+            let capsule_obj = t.into_dlpack_readonly(py).unwrap();
+            let bound = capsule_obj.into_bound(py);
+            let capsule: Bound<'_, PyCapsule> = bound.cast_into().unwrap();
+
+            let tensor = PyTensor::from_capsule(&capsule).unwrap();
+            assert!(tensor.is_read_only());
+            assert_eq!(tensor.shape(), &[2, 2]);
+            assert!(tensor.device().is_cpu());
+            assert!(tensor.dtype().is_f32());
+            // Dropping `tensor` runs the versioned deleter and frees the context.
+        });
+    }
+
+    #[test]
+    fn test_roundtrip_unversioned_not_readonly() {
+        use crate::IntoDLPack;
+        Python::attach(|py| {
+            let t = RoundTripTensor {
+                data: vec![1.0, 2.0, 3.0, 4.0],
+                shape: vec![2, 2],
+            };
+            let capsule_obj = t.into_dlpack(py).unwrap();
+            let bound = capsule_obj.into_bound(py);
+            let capsule: Bound<'_, PyCapsule> = bound.cast_into().unwrap();
+
+            let tensor = PyTensor::from_capsule(&capsule).unwrap();
+            assert!(!tensor.is_read_only());
+            assert_eq!(tensor.shape(), &[2, 2]);
+        });
+    }
+
+    #[test]
+    fn test_from_capsule_rejects_unknown_name() {
+        Python::attach(|py| {
+            // A capsule whose name is neither "dltensor" nor "dltensor_versioned"
+            // must be rejected by the name dispatcher.
+            let dummy = Box::new(0u8);
+            let dummy_ptr = Box::into_raw(dummy);
+            let capsule_ptr = unsafe {
+                pyo3::ffi::PyCapsule_New(
+                    dummy_ptr as *mut c_void,
+                    c"not_a_dlpack_capsule".as_ptr(),
+                    None,
+                )
+            };
+            assert!(!capsule_ptr.is_null());
+            let capsule: Bound<'_, PyCapsule> = unsafe { Bound::from_owned_ptr(py, capsule_ptr) }
+                .cast_into()
+                .unwrap();
+
+            let result = PyTensor::from_capsule(&capsule);
+            assert!(result.is_err());
+
+            // from_capsule rejected before consuming; reclaim the dummy box.
+            unsafe {
+                let _ = Box::from_raw(dummy_ptr);
+            }
+        });
+    }
+
+    #[test]
+    fn test_versioned_rejects_too_new_major() {
+        Python::attach(|py| {
+            // A versioned capsule claiming a major version newer than we support
+            // must be rejected (we may misinterpret a future struct layout).
+            let mut shape = vec![1i64];
+            let data = vec![0.0f32];
+            let managed = Box::new(DLManagedTensorVersioned {
+                version: crate::ffi::DLPackVersion {
+                    major: DLPACK_MAJOR_VERSION + 1,
+                    minor: 0,
+                },
+                manager_ctx: std::ptr::null_mut(),
+                deleter: None,
+                flags: 0,
+                dl_tensor: DLTensor {
+                    data: data.as_ptr() as *mut c_void,
+                    device: cpu_device(),
+                    ndim: 1,
+                    dtype: dtype_f32(),
+                    shape: shape.as_mut_ptr(),
+                    strides: std::ptr::null_mut(),
+                    byte_offset: 0,
+                },
+            });
+            let managed_ptr = Box::into_raw(managed);
+            let capsule_ptr = unsafe {
+                pyo3::ffi::PyCapsule_New(
+                    managed_ptr as *mut c_void,
+                    c"dltensor_versioned".as_ptr(),
+                    None,
+                )
+            };
+            assert!(!capsule_ptr.is_null());
+            let capsule: Bound<'_, PyCapsule> = unsafe { Bound::from_owned_ptr(py, capsule_ptr) }
+                .cast_into()
+                .unwrap();
+
+            let result = PyTensor::from_capsule(&capsule);
+            assert!(result.is_err());
+
+            // from_capsule rejected before consuming, so reclaim the box ourselves.
+            unsafe {
+                let _ = Box::from_raw(managed_ptr);
+            }
+            // Keep the backing arrays alive until after the pointers are done.
+            drop(shape);
+            drop(data);
+        });
+    }
+
+    #[test]
+    fn test_versioned_rejects_mismatched_lower_major() {
+        Python::attach(|py| {
+            // A versioned capsule claiming a major version LOWER than ours
+            // (e.g. 0) is malformed/ABI-incompatible and must be rejected too —
+            // we must not read flags/dl_tensor at our assumed offsets.
+            let mut shape = vec![1i64];
+            let data = vec![0.0f32];
+            let managed = Box::new(DLManagedTensorVersioned {
+                version: crate::ffi::DLPackVersion {
+                    major: DLPACK_MAJOR_VERSION - 1,
+                    minor: 0,
+                },
+                manager_ctx: std::ptr::null_mut(),
+                deleter: None,
+                flags: 0,
+                dl_tensor: DLTensor {
+                    data: data.as_ptr() as *mut c_void,
+                    device: cpu_device(),
+                    ndim: 1,
+                    dtype: dtype_f32(),
+                    shape: shape.as_mut_ptr(),
+                    strides: std::ptr::null_mut(),
+                    byte_offset: 0,
+                },
+            });
+            let managed_ptr = Box::into_raw(managed);
+            let capsule_ptr = unsafe {
+                pyo3::ffi::PyCapsule_New(
+                    managed_ptr as *mut c_void,
+                    c"dltensor_versioned".as_ptr(),
+                    None,
+                )
+            };
+            assert!(!capsule_ptr.is_null());
+            let capsule: Bound<'_, PyCapsule> = unsafe { Bound::from_owned_ptr(py, capsule_ptr) }
+                .cast_into()
+                .unwrap();
+
+            let result = PyTensor::from_capsule(&capsule);
+            assert!(result.is_err());
+
+            // from_capsule rejected before consuming, so reclaim the box ourselves.
+            unsafe {
+                let _ = Box::from_raw(managed_ptr);
+            }
+            drop(shape);
+            drop(data);
         });
     }
 }

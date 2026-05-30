@@ -24,3 +24,6 @@ build/
 
 # macOS
 .DS_Store
+
+# Internal Claude Code workflow artifacts (specs/plans)
+docs/superpowers/
