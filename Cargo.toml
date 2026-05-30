@@ -18,6 +18,8 @@ pyo3 = { version = "0.28", default-features = false }
 [dev-dependencies]
 pyo3 = { version = "0.28", features = ["auto-initialize"] }
 criterion = "0.8"
+dlpark = { version = "0.7", features = ["pyo3"] }
+numpy = "0.28"
 
 [features]
 default = []
