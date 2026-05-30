@@ -160,9 +160,13 @@ pub trait IntoDLPack: Send + Sized {
 /// `managed` field is handed to the `PyCapsule`; `managed.manager_ctx` points
 /// back to the box base so the deleter recovers and frees the whole allocation
 /// in a single step.
-struct ManagedContext<T> {
+///
+/// `M` is the FFI struct the consumer reads — either [`DLManagedTensor`]
+/// (legacy) or [`DLManagedTensorVersioned`] — so both export paths share one
+/// owning type.
+struct ManagedContext<T, M> {
     /// FFI struct exposed to the consumer. Its address is the capsule pointer.
-    managed: DLManagedTensor,
+    managed: M,
     /// The owned tensor, kept alive until the capsule is consumed.
     #[allow(dead_code)]
     tensor: T,
@@ -170,18 +174,6 @@ struct ManagedContext<T> {
     #[allow(dead_code)]
     shape: Vec<i64>,
     /// Strides array the `dl_tensor.strides` pointer references (if any).
-    #[allow(dead_code)]
-    strides: Option<Vec<i64>>,
-}
-
-/// Versioned counterpart of [`ManagedContext`].
-struct ManagedContextVersioned<T> {
-    /// FFI struct exposed to the consumer. Its address is the capsule pointer.
-    managed: DLManagedTensorVersioned,
-    #[allow(dead_code)]
-    tensor: T,
-    #[allow(dead_code)]
-    shape: Vec<i64>,
     #[allow(dead_code)]
     strides: Option<Vec<i64>>,
 }
@@ -244,6 +236,57 @@ fn build_dl_tensor(
     }
 }
 
+/// Reclaim and drop the owning [`ManagedContext`] box from a managed struct's
+/// `manager_ctx` pointer. Dropping the one Box frees the FFI struct, the tensor,
+/// and the shape/strides arrays together. No-op on a null context. `C` must be
+/// the exact `ManagedContext<T, M>` the box was created as.
+unsafe fn free_managed_ctx<C>(manager_ctx: *mut c_void) {
+    if !manager_ctx.is_null() {
+        let _ = Box::from_raw(manager_ctx as *mut C);
+    }
+}
+
+/// Wire a capsule around an already-built owning box, shared by both export
+/// paths. `ctx_ptr` is a leaked `Box<C>`; `managed_field` is the address of the
+/// `managed` field inside it (the pointer the capsule stores). On capsule
+/// creation failure the box is reclaimed and freed, so callers never leak.
+unsafe fn into_capsule<C>(
+    py: Python<'_>,
+    ctx_ptr: *mut C,
+    managed_field: *mut c_void,
+    name: &CStr,
+    destructor: unsafe extern "C" fn(*mut pyo3::ffi::PyObject),
+    err_msg: &str,
+) -> PyResult<Py<PyAny>> {
+    let capsule_ptr = pyo3::ffi::PyCapsule_New(managed_field, name.as_ptr(), Some(destructor));
+    if capsule_ptr.is_null() {
+        let _ = Box::from_raw(ctx_ptr);
+        return Err(pyo3::exceptions::PyMemoryError::new_err(err_msg.to_owned()));
+    }
+    Ok(Bound::from_owned_ptr(py, capsule_ptr).unbind())
+}
+
+/// Return the managed-struct pointer a capsule holds, or null if the capsule is
+/// null/unnamed or already consumed (renamed to `used_name`). Shared skeleton
+/// for both capsule destructors: a consumer that took ownership renamed the
+/// capsule and will call the deleter itself, so we must not double-free.
+unsafe fn unconsumed_managed_ptr(
+    capsule_ptr: *mut pyo3::ffi::PyObject,
+    used_name: &CStr,
+) -> *mut c_void {
+    if capsule_ptr.is_null() {
+        return std::ptr::null_mut();
+    }
+    let name_ptr = pyo3::ffi::PyCapsule_GetName(capsule_ptr);
+    if name_ptr.is_null() {
+        return std::ptr::null_mut();
+    }
+    if CStr::from_ptr(name_ptr).to_bytes() == used_name.to_bytes() {
+        return std::ptr::null_mut();
+    }
+    pyo3::ffi::PyCapsule_GetPointer(capsule_ptr, name_ptr)
+}
+
 /// Export a tensor to a `dltensor` PyCapsule in a single heap allocation.
 fn export_to_capsule<T: IntoDLPack>(
     py: Python<'_>,
@@ -263,9 +306,6 @@ fn export_to_capsule<T: IntoDLPack>(
     // the box; a Vec move keeps its buffer in place, so they stay valid.
     let dl_tensor = build_dl_tensor(data, device, dtype, byte_offset, &shape, &strides);
 
-    // One allocation owns the tensor, the shape/strides arrays, and the FFI
-    // struct the consumer reads. `manager_ctx` is filled in after boxing so it
-    // can point at the box base.
     let ctx_ptr = Box::into_raw(Box::new(ManagedContext {
         managed: DLManagedTensor {
             dl_tensor,
@@ -279,93 +319,44 @@ fn export_to_capsule<T: IntoDLPack>(
 
     // The capsule stores the address of the `managed` field; the deleter recovers
     // the whole box via `manager_ctx`.
-    let managed_ptr = unsafe {
+    unsafe {
         (*ctx_ptr).managed.manager_ctx = ctx_ptr as *mut c_void;
-        &mut (*ctx_ptr).managed as *mut DLManagedTensor
-    };
-
-    let capsule_ptr = unsafe {
-        pyo3::ffi::PyCapsule_New(
-            managed_ptr as *mut c_void,
-            DLPACK_CAPSULE_NAME.as_ptr(),
-            Some(raw_capsule_destructor),
-        )
-    };
-
-    if capsule_ptr.is_null() {
-        // Free the single owning allocation (managed + tensor + shape + strides).
-        unsafe {
-            let _ = Box::from_raw(ctx_ptr);
-        }
-        return Err(pyo3::exceptions::PyMemoryError::new_err(
+        let managed_field = &mut (*ctx_ptr).managed as *mut DLManagedTensor as *mut c_void;
+        into_capsule(
+            py,
+            ctx_ptr,
+            managed_field,
+            DLPACK_CAPSULE_NAME,
+            raw_capsule_destructor,
             "Failed to create DLPack capsule",
-        ));
+        )
     }
-
-    Ok(unsafe { Bound::from_owned_ptr(py, capsule_ptr).unbind() })
 }
 
-/// Raw PyCapsule destructor - called by Python when garbage collecting the capsule.
-///
-/// Per the DLPack protocol, when a consumer takes ownership of the tensor
-/// (e.g., via torch.from_dlpack), it must rename the capsule from "dltensor"
-/// to "used_dltensor" and will call the deleter itself when done.
-///
-/// This destructor checks the capsule name to avoid double-free:
-/// - If name is "dltensor": capsule was never consumed, we call the deleter
-/// - If name is "used_dltensor": consumer owns it and will call deleter, skip
+/// Raw PyCapsule destructor for legacy (`dltensor`) capsules — called by Python
+/// when GC'ing an unconsumed capsule. A consumer that took ownership (e.g.
+/// `torch.from_dlpack`) renamed it to `used_dltensor` and calls the deleter
+/// itself, which [`unconsumed_managed_ptr`] detects.
 unsafe extern "C" fn raw_capsule_destructor(capsule_ptr: *mut pyo3::ffi::PyObject) {
-    if capsule_ptr.is_null() {
-        return;
-    }
-
-    // Check the capsule name to see if it was consumed
-    let name_ptr = pyo3::ffi::PyCapsule_GetName(capsule_ptr);
-    if name_ptr.is_null() {
-        // No name set - shouldn't happen with our capsules
-        return;
-    }
-
-    let name = CStr::from_ptr(name_ptr);
-
-    // If name is "used_dltensor", the consumer has taken ownership
-    // and will call the deleter when done. Don't double-free.
-    if name.to_bytes() == DLPACK_CAPSULE_NAME_USED.to_bytes() {
-        return;
-    }
-
-    // Get the DLManagedTensor pointer from the capsule using the current name
     let managed_ptr =
-        pyo3::ffi::PyCapsule_GetPointer(capsule_ptr, name_ptr) as *mut DLManagedTensor;
-
+        unconsumed_managed_ptr(capsule_ptr, DLPACK_CAPSULE_NAME_USED) as *mut DLManagedTensor;
     if managed_ptr.is_null() {
         return;
     }
-
-    // Capsule was not consumed, call the DLPack deleter
-    let managed = &*managed_ptr;
-    if let Some(deleter) = managed.deleter {
+    if let Some(deleter) = (*managed_ptr).deleter {
         deleter(managed_ptr);
     }
 }
 
-/// Deleter called by the consumer when done with the tensor.
+/// Deleter for legacy managed tensors, called by the consumer when done.
 ///
-/// This is an extern "C" function that matches the DLPack deleter signature.
+/// `managed_ptr` points at the `managed` field *inside* the owning
+/// `ManagedContext`; `manager_ctx` points at the box base.
 unsafe extern "C" fn dlpack_deleter<T>(managed_ptr: *mut DLManagedTensor) {
     if managed_ptr.is_null() {
         return;
     }
-
-    // `managed_ptr` points at the `managed` field *inside* the owning
-    // `ManagedContext`; `manager_ctx` points at the box base. Reconstructing and
-    // dropping that one Box frees the FFI struct, the tensor, and the
-    // shape/strides arrays together.
-    let manager_ctx = (*managed_ptr).manager_ctx;
-    if manager_ctx.is_null() {
-        return;
-    }
-    let _ctx = Box::from_raw(manager_ctx as *mut ManagedContext<T>);
+    free_managed_ctx::<ManagedContext<T, DLManagedTensor>>((*managed_ptr).manager_ctx);
 }
 
 /// Export a tensor to a versioned (`dltensor_versioned`) PyCapsule with the
@@ -387,7 +378,7 @@ fn export_to_capsule_versioned<T: IntoDLPack>(
     } = info;
     let dl_tensor = build_dl_tensor(data, device, dtype, byte_offset, &shape, &strides);
 
-    let ctx_ptr = Box::into_raw(Box::new(ManagedContextVersioned {
+    let ctx_ptr = Box::into_raw(Box::new(ManagedContext {
         managed: DLManagedTensorVersioned {
             version: DLPackVersion {
                 major: DLPACK_MAJOR_VERSION,
@@ -403,60 +394,30 @@ fn export_to_capsule_versioned<T: IntoDLPack>(
         strides,
     }));
 
-    let managed_ptr = unsafe {
+    unsafe {
         (*ctx_ptr).managed.manager_ctx = ctx_ptr as *mut c_void;
-        &mut (*ctx_ptr).managed as *mut DLManagedTensorVersioned
-    };
-
-    let capsule_ptr = unsafe {
-        pyo3::ffi::PyCapsule_New(
-            managed_ptr as *mut c_void,
-            DLPACK_VERSIONED_CAPSULE_NAME.as_ptr(),
-            Some(raw_capsule_destructor_versioned),
-        )
-    };
-
-    if capsule_ptr.is_null() {
-        unsafe {
-            let _ = Box::from_raw(ctx_ptr);
-        }
-        return Err(pyo3::exceptions::PyMemoryError::new_err(
+        let managed_field =
+            &mut (*ctx_ptr).managed as *mut DLManagedTensorVersioned as *mut c_void;
+        into_capsule(
+            py,
+            ctx_ptr,
+            managed_field,
+            DLPACK_VERSIONED_CAPSULE_NAME,
+            raw_capsule_destructor_versioned,
             "Failed to create versioned DLPack capsule",
-        ));
+        )
     }
-
-    Ok(unsafe { Bound::from_owned_ptr(py, capsule_ptr).unbind() })
 }
 
-/// Raw PyCapsule destructor for versioned capsules.
-///
-/// Mirrors [`raw_capsule_destructor`] but checks the versioned capsule names
-/// and interprets the pointer as a `DLManagedTensorVersioned`.
+/// Raw PyCapsule destructor for versioned (`dltensor_versioned`) capsules.
+/// Mirrors [`raw_capsule_destructor`] but reads a `DLManagedTensorVersioned`.
 unsafe extern "C" fn raw_capsule_destructor_versioned(capsule_ptr: *mut pyo3::ffi::PyObject) {
-    if capsule_ptr.is_null() {
-        return;
-    }
-
-    let name_ptr = pyo3::ffi::PyCapsule_GetName(capsule_ptr);
-    if name_ptr.is_null() {
-        return;
-    }
-
-    let name = CStr::from_ptr(name_ptr);
-
-    // If consumed, the consumer owns it and will call the deleter. Don't double-free.
-    if name.to_bytes() == DLPACK_VERSIONED_CAPSULE_NAME_USED.to_bytes() {
-        return;
-    }
-
-    let managed_ptr =
-        pyo3::ffi::PyCapsule_GetPointer(capsule_ptr, name_ptr) as *mut DLManagedTensorVersioned;
+    let managed_ptr = unconsumed_managed_ptr(capsule_ptr, DLPACK_VERSIONED_CAPSULE_NAME_USED)
+        as *mut DLManagedTensorVersioned;
     if managed_ptr.is_null() {
         return;
     }
-
-    let managed = &*managed_ptr;
-    if let Some(deleter) = managed.deleter {
+    if let Some(deleter) = (*managed_ptr).deleter {
         deleter(managed_ptr);
     }
 }
@@ -466,12 +427,7 @@ unsafe extern "C" fn dlpack_deleter_versioned<T>(managed_ptr: *mut DLManagedTens
     if managed_ptr.is_null() {
         return;
     }
-
-    let manager_ctx = (*managed_ptr).manager_ctx;
-    if manager_ctx.is_null() {
-        return;
-    }
-    let _ctx = Box::from_raw(manager_ctx as *mut ManagedContextVersioned<T>);
+    free_managed_ctx::<ManagedContext<T, DLManagedTensorVersioned>>((*managed_ptr).manager_ctx);
 }
 
 #[cfg(test)]
