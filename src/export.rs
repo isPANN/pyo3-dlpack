@@ -154,29 +154,43 @@ pub trait IntoDLPack: Send + Sized {
     }
 }
 
-/// Internal context that owns the tensor during DLPack lifetime.
-struct ExportContext<T> {
-    /// The owned tensor (kept alive until the capsule is consumed)
+/// Single heap allocation that owns the exported tensor *and* the FFI managed
+/// struct the consumer reads. Keeping them in one box (rather than two separate
+/// `Box`es) is one `malloc`/`free` per export instead of two. The address of the
+/// `managed` field is handed to the `PyCapsule`; `managed.manager_ctx` points
+/// back to the box base so the deleter recovers and frees the whole allocation
+/// in a single step.
+struct ManagedContext<T> {
+    /// FFI struct exposed to the consumer. Its address is the capsule pointer.
+    managed: DLManagedTensor,
+    /// The owned tensor, kept alive until the capsule is consumed.
     #[allow(dead_code)]
     tensor: T,
-    /// Shape array (must remain valid)
+    /// Shape array the `dl_tensor.shape` pointer references.
+    #[allow(dead_code)]
     shape: Vec<i64>,
-    /// Strides array (must remain valid)
+    /// Strides array the `dl_tensor.strides` pointer references (if any).
+    #[allow(dead_code)]
     strides: Option<Vec<i64>>,
 }
 
-/// Build the owning context and the `DLTensor` descriptor shared by both the
-/// legacy and versioned export paths.
-///
-/// On success returns the raw context pointer (the caller takes ownership and
-/// must free it if capsule creation later fails) and the populated `DLTensor`.
-fn build_export_parts<T: IntoDLPack>(
+/// Versioned counterpart of [`ManagedContext`].
+struct ManagedContextVersioned<T> {
+    /// FFI struct exposed to the consumer. Its address is the capsule pointer.
+    managed: DLManagedTensorVersioned,
+    #[allow(dead_code)]
     tensor: T,
-    info: TensorInfo,
-) -> PyResult<(*mut ExportContext<T>, DLTensor)> {
-    // Validate strides length matches shape length to prevent out-of-bounds reads
-    // by DLPack consumers. This catches cases where TensorInfo is constructed
-    // manually without using the strided() constructor.
+    #[allow(dead_code)]
+    shape: Vec<i64>,
+    #[allow(dead_code)]
+    strides: Option<Vec<i64>>,
+}
+
+/// Validate that an explicit strides array matches the shape rank, to prevent
+/// out-of-bounds reads by DLPack consumers. This catches cases where
+/// `TensorInfo` is constructed manually without using the `strided()`
+/// constructor.
+fn validate_strides(info: &TensorInfo) -> PyResult<()> {
     if let Some(ref strides) = info.strides {
         if strides.len() != info.shape.len() {
             return Err(pyo3::exceptions::PyValueError::new_err(format!(
@@ -186,67 +200,90 @@ fn build_export_parts<T: IntoDLPack>(
             )));
         }
     }
+    Ok(())
+}
 
-    // Create the context that will own the tensor
-    let ctx = Box::new(ExportContext {
-        tensor,
-        shape: info.shape,
-        strides: info.strides,
-    });
-    let ctx_ptr = Box::into_raw(ctx);
-
-    // SAFETY: For scalar tensors (ndim == 0), shape and strides pointers MUST be null.
-    // Using as_mut_ptr() on an empty Vec returns a non-null dangling pointer, which
-    // violates the DLPack spec and can cause UB if consumers read the pointer.
-    let ndim = unsafe { (*ctx_ptr).shape.len() as i32 };
+/// Build the `DLTensor` descriptor. The `shape`/`strides` arguments must be the
+/// heap buffers that will be moved into the owning context; a `Vec` move does
+/// not relocate its buffer, so the pointers captured here stay valid after the
+/// Vecs are moved into the box.
+///
+/// SAFETY/spec: for scalar tensors (`ndim == 0`) the shape and strides pointers
+/// MUST be null — `Vec::as_ptr` on an empty Vec returns a dangling non-null
+/// pointer that consumers must never dereference.
+fn build_dl_tensor(
+    data: *mut c_void,
+    device: DLDevice,
+    dtype: DLDataType,
+    byte_offset: u64,
+    shape: &[i64],
+    strides: &Option<Vec<i64>>,
+) -> DLTensor {
+    let ndim = shape.len() as i32;
     let shape_ptr = if ndim == 0 {
         std::ptr::null_mut()
     } else {
-        unsafe { (*ctx_ptr).shape.as_mut_ptr() }
+        shape.as_ptr() as *mut i64
     };
     let strides_ptr = if ndim == 0 {
         std::ptr::null_mut()
     } else {
-        unsafe {
-            (*ctx_ptr)
-                .strides
-                .as_mut()
-                .map(|s| s.as_mut_ptr())
-                .unwrap_or(std::ptr::null_mut())
-        }
+        strides
+            .as_ref()
+            .map(|s| s.as_ptr() as *mut i64)
+            .unwrap_or(std::ptr::null_mut())
     };
-
-    let dl_tensor = DLTensor {
-        data: info.data,
-        device: info.device,
+    DLTensor {
+        data,
+        device,
         ndim,
-        dtype: info.dtype,
+        dtype,
         shape: shape_ptr,
         strides: strides_ptr,
-        byte_offset: info.byte_offset,
-    };
-
-    Ok((ctx_ptr, dl_tensor))
+        byte_offset,
+    }
 }
 
-/// Export a tensor to a PyCapsule.
+/// Export a tensor to a `dltensor` PyCapsule in a single heap allocation.
 fn export_to_capsule<T: IntoDLPack>(
     py: Python<'_>,
     tensor: T,
     info: TensorInfo,
 ) -> PyResult<Py<PyAny>> {
-    let (ctx_ptr, dl_tensor) = build_export_parts(tensor, info)?;
+    validate_strides(&info)?;
+    let TensorInfo {
+        data,
+        device,
+        dtype,
+        shape,
+        strides,
+        byte_offset,
+    } = info;
+    // Capture the shape/strides buffer pointers before the Vecs are moved into
+    // the box; a Vec move keeps its buffer in place, so they stay valid.
+    let dl_tensor = build_dl_tensor(data, device, dtype, byte_offset, &shape, &strides);
 
-    let managed = Box::new(DLManagedTensor {
-        dl_tensor,
-        manager_ctx: ctx_ptr as *mut c_void,
-        deleter: Some(dlpack_deleter::<T>),
-    });
-    let managed_ptr = Box::into_raw(managed);
+    // One allocation owns the tensor, the shape/strides arrays, and the FFI
+    // struct the consumer reads. `manager_ctx` is filled in after boxing so it
+    // can point at the box base.
+    let ctx_ptr = Box::into_raw(Box::new(ManagedContext {
+        managed: DLManagedTensor {
+            dl_tensor,
+            manager_ctx: std::ptr::null_mut(),
+            deleter: Some(dlpack_deleter::<T>),
+        },
+        tensor,
+        shape,
+        strides,
+    }));
 
-    // Create the PyCapsule using low-level FFI to ensure the pointer is stored directly.
-    // DLPack consumers expect PyCapsule_GetPointer to return a DLManagedTensor* directly.
-    // Use the crate-level CStr constant so the name is defined exactly once.
+    // The capsule stores the address of the `managed` field; the deleter recovers
+    // the whole box via `manager_ctx`.
+    let managed_ptr = unsafe {
+        (*ctx_ptr).managed.manager_ctx = ctx_ptr as *mut c_void;
+        &mut (*ctx_ptr).managed as *mut DLManagedTensor
+    };
+
     let capsule_ptr = unsafe {
         pyo3::ffi::PyCapsule_New(
             managed_ptr as *mut c_void,
@@ -256,9 +293,8 @@ fn export_to_capsule<T: IntoDLPack>(
     };
 
     if capsule_ptr.is_null() {
-        // Clean up on failure - must free BOTH managed_ptr AND ctx_ptr.
+        // Free the single owning allocation (managed + tensor + shape + strides).
         unsafe {
-            let _ = Box::from_raw(managed_ptr);
             let _ = Box::from_raw(ctx_ptr);
         }
         return Err(pyo3::exceptions::PyMemoryError::new_err(
@@ -321,14 +357,15 @@ unsafe extern "C" fn dlpack_deleter<T>(managed_ptr: *mut DLManagedTensor) {
         return;
     }
 
-    // Recover and drop the managed tensor
-    let managed = Box::from_raw(managed_ptr);
-
-    // Recover and drop the context (which owns the tensor)
-    if !managed.manager_ctx.is_null() {
-        let _ctx = Box::from_raw(managed.manager_ctx as *mut ExportContext<T>);
-        // ctx and its tensor are dropped here
+    // `managed_ptr` points at the `managed` field *inside* the owning
+    // `ManagedContext`; `manager_ctx` points at the box base. Reconstructing and
+    // dropping that one Box frees the FFI struct, the tensor, and the
+    // shape/strides arrays together.
+    let manager_ctx = (*managed_ptr).manager_ctx;
+    if manager_ctx.is_null() {
+        return;
     }
+    let _ctx = Box::from_raw(manager_ctx as *mut ManagedContext<T>);
 }
 
 /// Export a tensor to a versioned (`dltensor_versioned`) PyCapsule with the
@@ -339,19 +376,37 @@ fn export_to_capsule_versioned<T: IntoDLPack>(
     info: TensorInfo,
     flags: u64,
 ) -> PyResult<Py<PyAny>> {
-    let (ctx_ptr, dl_tensor) = build_export_parts(tensor, info)?;
+    validate_strides(&info)?;
+    let TensorInfo {
+        data,
+        device,
+        dtype,
+        shape,
+        strides,
+        byte_offset,
+    } = info;
+    let dl_tensor = build_dl_tensor(data, device, dtype, byte_offset, &shape, &strides);
 
-    let managed = Box::new(DLManagedTensorVersioned {
-        version: DLPackVersion {
-            major: DLPACK_MAJOR_VERSION,
-            minor: DLPACK_MINOR_VERSION,
+    let ctx_ptr = Box::into_raw(Box::new(ManagedContextVersioned {
+        managed: DLManagedTensorVersioned {
+            version: DLPackVersion {
+                major: DLPACK_MAJOR_VERSION,
+                minor: DLPACK_MINOR_VERSION,
+            },
+            manager_ctx: std::ptr::null_mut(),
+            deleter: Some(dlpack_deleter_versioned::<T>),
+            flags,
+            dl_tensor,
         },
-        manager_ctx: ctx_ptr as *mut c_void,
-        deleter: Some(dlpack_deleter_versioned::<T>),
-        flags,
-        dl_tensor,
-    });
-    let managed_ptr = Box::into_raw(managed);
+        tensor,
+        shape,
+        strides,
+    }));
+
+    let managed_ptr = unsafe {
+        (*ctx_ptr).managed.manager_ctx = ctx_ptr as *mut c_void;
+        &mut (*ctx_ptr).managed as *mut DLManagedTensorVersioned
+    };
 
     let capsule_ptr = unsafe {
         pyo3::ffi::PyCapsule_New(
@@ -363,7 +418,6 @@ fn export_to_capsule_versioned<T: IntoDLPack>(
 
     if capsule_ptr.is_null() {
         unsafe {
-            let _ = Box::from_raw(managed_ptr);
             let _ = Box::from_raw(ctx_ptr);
         }
         return Err(pyo3::exceptions::PyMemoryError::new_err(
@@ -413,10 +467,11 @@ unsafe extern "C" fn dlpack_deleter_versioned<T>(managed_ptr: *mut DLManagedTens
         return;
     }
 
-    let managed = Box::from_raw(managed_ptr);
-    if !managed.manager_ctx.is_null() {
-        let _ctx = Box::from_raw(managed.manager_ctx as *mut ExportContext<T>);
+    let manager_ctx = (*managed_ptr).manager_ctx;
+    if manager_ctx.is_null() {
+        return;
     }
+    let _ctx = Box::from_raw(manager_ctx as *mut ManagedContextVersioned<T>);
 }
 
 #[cfg(test)]
